@@ -1,0 +1,56 @@
+---
+description: MienMien项目全局Cursor执行规约
+alwaysApply: true
+---
+
+# MienMien 全局执行规约
+
+## 通用约束
+
+- 非代码内容必须使用中文；代码按对应语言规范编写。
+- 目录命名使用英文小写与短横线（kebab-case），避免中文、空格、下划线。
+- 平台边界必须严格遵守，不跨目录混放源码。
+- 法律与治理基线必须遵守：`LICENSE`（BSL 1.1）+ `CLA.md` + `CONTRIBUTING.md`。
+
+## 平台边界与语言
+
+- `java/business/`、`java/consumer/`：仅 Java 后端代码。
+- `ios/`：仅 Swift/Objective-C。
+- `android/`：仅 Kotlin/Java（Android）。
+- `web/`：仅 JavaScript/HTML/CSS。
+- `doc/`：仅文档，不放生产代码。
+
+## SDD（简化模式，强制）
+
+1. 每个新需求仅创建一个目录：`doc/sdd/changes/<ChangeID>/`。
+2. 每个变更目录仅允许两个核心文件：
+   - `vision-requirements.md`
+   - `plan-task.md`
+3. 变更顺序强制为：
+   - 先更新并确认 `vision-requirements.md`
+   - 再更新 `plan-task.md`
+4. 同一个 PR/会话仅关联一个 `<ChangeID>` 目录，不混入多需求。
+5. 模板来源：
+   - `doc/sdd/templates/vision-requirements-template.md`
+   - `doc/sdd/templates/plan-task-template.md`
+
+## Java 后端（强制 DDD）
+
+适用目录：`java/business/`、`java/consumer/`
+
+1. 必须采用 DDD 分层：`domain`、`application`、`infrastructure`、`interfaces`。
+2. 先定义限界上下文和聚合边界，再落代码实现。
+3. 关键业务规则必须在领域层表达，禁止散落在控制器或 DAO。
+4. Java 代码规范以《阿里巴巴 Java 开发手册》为基线执行。
+5. 详细规范以 `doc/sdd/java-ddd-guideline.md` 为准。
+
+## iOS / Android / Web（强制成熟架构模式）
+
+1. `ios/` 必须遵循 `doc/sdd/ios-architecture-guideline.md`。
+2. `android/` 必须遵循 `doc/sdd/android-architecture-guideline.md`。
+3. `web/` 必须遵循 `doc/sdd/web-architecture-guideline.md`。
+4. 禁止把复杂业务逻辑直接放入页面/控制器层，必须按分层与职责边界实现。
+
+## 执行优先级
+
+当临时做法与本规约冲突时，以本规约为准；若与 `doc/sdd/constitution.md` 冲突，以宪法为最高优先级。

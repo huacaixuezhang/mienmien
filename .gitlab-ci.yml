@@ -1,0 +1,94 @@
+stages:
+  - compliance
+
+default:
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache bash git curl jq
+
+cla-gate:
+  stage: compliance
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - set -euo pipefail
+    - CLA_FILE=".github/cla-signed-users.txt"
+    - |
+      if [ ! -f "$CLA_FILE" ]; then
+        echo "CLA 校验失败：缺少 $CLA_FILE"
+        exit 1
+      fi
+    - |
+      MR_API="$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID"
+      MR_AUTHOR="$(curl --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" "$MR_API" | jq -r '.author.username')"
+      if [ -z "$MR_AUTHOR" ] || [ "$MR_AUTHOR" = "null" ]; then
+        echo "CLA 校验失败：无法获取 MR 作者用户名"
+        exit 1
+      fi
+      echo "MR 作者：$MR_AUTHOR"
+      if grep -qx "$MR_AUTHOR" "$CLA_FILE"; then
+        echo "CLA 校验通过：$MR_AUTHOR"
+      else
+        echo "CLA 校验失败：$MR_AUTHOR 未在 $CLA_FILE 中"
+        exit 1
+      fi
+
+sdd-gate:
+  stage: compliance
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - set -euo pipefail
+    - |
+      required=(
+        "doc/sdd/changes/README.md"
+        "doc/sdd/templates/vision-requirements-template.md"
+        "doc/sdd/templates/plan-task-template.md"
+        "doc/sdd/java-ddd-guideline.md"
+      )
+      for file in "${required[@]}"; do
+        if [ ! -f "$file" ]; then
+          echo "SDD 校验失败：缺少必需文件 $file"
+          exit 1
+        fi
+      done
+    - git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --depth=1
+    - |
+      CHANGED_FILES="$(git diff --name-only "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME...$CI_COMMIT_SHA")"
+      echo "本次 MR 变更文件："
+      echo "$CHANGED_FILES"
+      echo "$CHANGED_FILES" | grep -q '^doc/sdd/changes/' || {
+        echo "SDD 校验失败：未包含 doc/sdd/changes/ 变更"
+        exit 1
+      }
+      CHANGE_DIRS="$(echo "$CHANGED_FILES" | grep '^doc/sdd/changes/' | cut -d/ -f1-4 | sort -u || true)"
+      CHANGE_DIR_COUNT="$(echo "$CHANGE_DIRS" | sed '/^$/d' | wc -l | tr -d ' ')"
+      if [ "$CHANGE_DIR_COUNT" -ne 1 ]; then
+        echo "SDD 校验失败：同一个 MR 仅允许一个变更目录，当前：$CHANGE_DIR_COUNT"
+        echo "$CHANGE_DIRS"
+        exit 1
+      fi
+      CHANGE_DIR="$(echo "$CHANGE_DIRS" | sed '/^$/d' | head -n1)"
+      test -f "$CHANGE_DIR/vision-requirements.md" || {
+        echo "SDD 校验失败：缺少 $CHANGE_DIR/vision-requirements.md"
+        exit 1
+      }
+      test -f "$CHANGE_DIR/plan-task.md" || {
+        echo "SDD 校验失败：缺少 $CHANGE_DIR/plan-task.md"
+        exit 1
+      }
+      VISION_CHANGED="false"
+      PLAN_CHANGED="false"
+      echo "$CHANGED_FILES" | grep -q "^$CHANGE_DIR/vision-requirements.md$" && VISION_CHANGED="true"
+      echo "$CHANGED_FILES" | grep -q "^$CHANGE_DIR/plan-task.md$" && PLAN_CHANGED="true"
+      if [ "$PLAN_CHANGED" = "true" ] && [ "$VISION_CHANGED" != "true" ]; then
+        if grep -Eq "示例需求占位|示例占位" "$CHANGE_DIR/vision-requirements.md"; then
+          echo "SDD 校验失败：vision-requirements.md 仍为示例占位，不能直接进入 plan-task"
+          exit 1
+        fi
+      fi
+      if [ "$VISION_CHANGED" != "true" ] && [ "$PLAN_CHANGED" != "true" ]; then
+        echo "SDD 校验失败：未更新 vision-requirements.md 或 plan-task.md"
+        exit 1
+      fi
+      echo "SDD 校验通过"

@@ -1,0 +1,94 @@
+name: sdd-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-sdd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 校验 SDD 基线文档存在
+        run: |
+          set -euo pipefail
+          required=(
+            "doc/sdd/changes/README.md"
+            "doc/sdd/templates/vision-requirements-template.md"
+            "doc/sdd/templates/plan-task-template.md"
+            "doc/sdd/java-ddd-guideline.md"
+          )
+
+          for file in "${required[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "缺少必需 SDD 文档：$file"
+              exit 1
+            fi
+          done
+
+      - name: 校验 PR 的简化 SDD 规则
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_REF" --depth=1
+
+          CHANGED_FILES="$(git diff --name-only "origin/$BASE_REF...$HEAD_SHA")"
+          echo "本次 PR 变更文件："
+          echo "$CHANGED_FILES"
+
+          # 必须包含 SDD 变更
+          echo "$CHANGED_FILES" | grep -q '^doc/sdd/changes/' || {
+            echo "SDD 校验失败：本次 PR 未包含 doc/sdd 文档变更。"
+            exit 1
+          }
+
+          CHANGE_DIRS="$(echo "$CHANGED_FILES" | grep '^doc/sdd/changes/' | cut -d/ -f1-4 | sort -u || true)"
+          CHANGE_DIR_COUNT="$(echo "$CHANGE_DIRS" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [[ "$CHANGE_DIR_COUNT" -ne 1 ]]; then
+            echo "SDD 校验失败：同一个 PR 只能关联一个变更目录，当前数量：$CHANGE_DIR_COUNT"
+            echo "$CHANGE_DIRS"
+            exit 1
+          fi
+          CHANGE_DIR="$(echo "$CHANGE_DIRS" | sed '/^$/d' | head -n1)"
+
+          # 变更目录必须包含两份核心文件
+          test -f "$CHANGE_DIR/vision-requirements.md" || {
+            echo "SDD 校验失败：缺少 $CHANGE_DIR/vision-requirements.md"
+            exit 1
+          }
+          test -f "$CHANGE_DIR/plan-task.md" || {
+            echo "SDD 校验失败：缺少 $CHANGE_DIR/plan-task.md"
+            exit 1
+          }
+
+          VISION_CHANGED="false"
+          PLAN_CHANGED="false"
+          echo "$CHANGED_FILES" | grep -q "^$CHANGE_DIR/vision-requirements.md$" && VISION_CHANGED="true"
+          echo "$CHANGED_FILES" | grep -q "^$CHANGE_DIR/plan-task.md$" && PLAN_CHANGED="true"
+
+          # 顺序约束：允许分阶段PR（先vision，后plan）。
+          # 如果本次仅更新 plan-task，则要求 vision 文件已存在且不是示例占位内容。
+          if [[ "$PLAN_CHANGED" == "true" && "$VISION_CHANGED" != "true" ]]; then
+            if grep -Eq "示例需求占位|示例占位" "$CHANGE_DIR/vision-requirements.md"; then
+              echo "SDD 校验失败：vision-requirements.md 仍为示例占位，不能直接进入 plan-task。"
+              exit 1
+            fi
+          fi
+
+          # 至少更新一份核心文件
+          if [[ "$VISION_CHANGED" != "true" && "$PLAN_CHANGED" != "true" ]]; then
+            echo "SDD 校验失败：本次 PR 未更新两份核心文件（vision-requirements.md / plan-task.md）。"
+            exit 1
+          fi
+
+          echo "SDD 校验通过：简化 SDD 规则满足。"

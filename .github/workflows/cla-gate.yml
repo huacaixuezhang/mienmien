@@ -1,0 +1,52 @@
+name: cla-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-cla:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate CLA signature status
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          # 依据一：维护者维护的人工白名单。
+          CLA_FILE=".github/cla-signed-users.txt"
+          if [[ ! -f "$CLA_FILE" ]]; then
+            echo "缺少 $CLA_FILE"
+            echo "请创建该文件，并按每行一个 GitHub 用户名填写。"
+            exit 1
+          fi
+
+          # 依据二：PR 标签 "cla:signed"。
+          LABEL_MATCH="false"
+          if echo "$PR_LABELS" | tr -d '[:space:]' | grep -q '"cla:signed"'; then
+            LABEL_MATCH="true"
+          fi
+
+          USER_MATCH="false"
+          if grep -qx "$PR_AUTHOR" "$CLA_FILE"; then
+            USER_MATCH="true"
+          fi
+
+          if [[ "$LABEL_MATCH" == "true" || "$USER_MATCH" == "true" ]]; then
+            echo "CLA 校验通过，用户：$PR_AUTHOR"
+            exit 0
+          fi
+
+          echo "CLA 校验失败，用户：$PR_AUTHOR"
+          echo "要求：先签署 CLA（CLA.md），并将用户名加入 $CLA_FILE"
+          echo "维护者也可通过添加 'cla:signed' 标签放行。"
+          exit 1

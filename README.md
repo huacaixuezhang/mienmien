@@ -1,93 +1,51 @@
 # MienMien
 
+MienMien 是一个社区驱动项目，独家商业化权利由 `王振` 保留。
 
+## 授权模型
 
-## Getting started
+- 源码许可：Business Source License 1.1（见 `LICENSE`）
+- 贡献前置协议：`CLA.md`
+- 商业化权利：依据 `LICENSE` 中的独家商业化例外条款，由 `王振` 统一管理
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## 贡献要求
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+所有 PR 在合并前必须通过 CLA 校验。
 
-## Add your files
+1. 在 `doc/governance/cla-signatures/register.md` 完成签署登记并提交签署证据。
+2. 创建 PR。
+3. 确保 `cla-gate` CI 状态为 `success`。
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+未签署 CLA 的 PR 将被阻断合并。
 
-```
-cd existing_repo
-git remote add origin https://jihulab.com/jijikeji/mienmien.git
-git branch -M main
-git push -uf origin main
-```
+## 收益公开与贡献者回馈单方声明
 
-## Integrate with your tools
+以下声明由 `王振` 单方发布，不构成对 `LICENSE` 或 `CLA.md` 约束条款的修改。
 
-* [Set up project integrations](https://jihulab.com/jijikeji/mienmien/-/settings/integrations)
+1. `王振` 将在 `doc/governance/revenue-disclosures/` 定期公开与 `MienMien` 相关的高层级商业收益信息。
+2. `王振` 可基于独立规则设立贡献者回馈机制（如资助、赏金、赞助或服务额度）。
+3. 参与条件、发放频率、金额标准与具体规则由 `王振` 单方决定，并可随时调整、暂停或终止。
+4. 贡献行为本身不自动产生版税、分红、股权或持续性报酬权利。
 
-## Collaborate with your team
+相关公开与归档目录见：`doc/governance/`。
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## 架构与目录原则
 
-## Test and Deploy
+本仓库按平台分目录组织：
 
-Use the built-in continuous integration in GitLab.
+- `java/business/`：B 端后端代码（Java）
+- `java/consumer/`：C 端后端代码（Java）
+- `ios/`：iOS 代码（Swift/Objective-C）
+- `android/`：Android 代码（Kotlin/Java）
+- `web/`：Web 代码（JavaScript/HTML/CSS）
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+各平台在本目录内维护自身契约与实现，不跨目录混放源码。
+其中 Java 后端采用 DDD（领域驱动设计）进行建模与实现。
+iOS、Android、Web 采用业界成熟架构模式，具体见 `doc/sdd/` 对应规范文件。
 
-***
+## SDD 规范
 
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+本项目采用 SDD（Spec-Driven Development）规范，文档位于 `doc/sdd/`。
+开发新功能前，请在 `doc/sdd/changes/<ChangeID>/` 中先完成 `vision-requirements.md`，确认后再更新 `plan-task.md`。
+PR 合并前必须通过 `sdd-gate` 检查，否则无法合并。
+当前以 GitLab 为主门禁（`.gitlab-ci.yml`），GitHub 工作流用于镜像仓库一致性校验。
