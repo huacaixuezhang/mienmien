@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MienMien | 面试管理B端系统</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: '#4062F4',
+            sidebarBg: '#0F172A',
+            cardBg: '#ffffff',
+            neutralGray: '#f3f4f6',
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+        },
+      }
+    }
+  </script>
+  <style type="text/tailwindcss">
+    @layer utilities {
+      .scrollbar-hide {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+      .scrollbar-hide::-webkit-scrollbar {
+        display: none;
+      }
+      .card-shadow {
+        box-shadow: 0 2px 12px 0 rgba(0,0,0,0.08);
+      }
+      .drag-item {
+        cursor: move;
+      }
+    }
+  </style>
+</head>
+<body class="bg-neutralGray font-sans antialiased h-screen overflow-hidden">
+<div class="flex h-full">
+  <!-- 左侧侧边栏 -->
+  <aside class="w-64 bg-sidebarBg text-white flex flex-col">
+    <div class="px-5 py-4 border-b border-gray-700">
+      <h1 class="text-xl font-bold flex items-center gap-2">
+        <i class="fa fa-briefcase text-primary"></i>
+        <span>MienMien</span>
+      </h1>
+      <p class="text-gray-400 text-xs mt-1">B端 面试全生命周期管理</p>
+    </div>
+
+    <!-- 多工作空间列表 -->
+    <div class="px-3 py-4">
+      <div class="flex justify-between items-center mb-3">
+        <span class="text-sm text-gray-300">我的工作空间</span>
+        <button onclick="addSpace()" class="text-primary text-sm hover:opacity-80">
+          <i class="fa fa-plus"></i> 新增
+        </button>
+      </div>
+      <div id="spaceList" class="flex flex-col gap-2">
+        <div onclick="switchSpace(1)" class="space-item bg-primary/20 rounded-md px-3 py-2 cursor-pointer hover:bg-primary/30">
+          <i class="fa fa-cube mr-2"></i>空间 #1
+        </div>
+        <div onclick="switchSpace(2)" class="space-item rounded-md px-3 py-2 cursor-pointer hover:bg-gray-700">
+          <i class="fa fa-cube mr-2"></i>空间 #2
+        </div>
+      </div>
+    </div>
+
+    <!-- 主导航菜单 -->
+    <nav class="mt-2 flex-1 overflow-y-auto scrollbar-hide">
+      <div class="px-2">
+        <p class="text-gray-500 text-xs px-3 py-2">空间模块</p>
+        <div onclick="changeTab('resume')" class="nav-item px-3 py-2 rounded-md cursor-pointer hover:bg-gray-700 flex items-center gap-2">
+          <i class="fa fa-file-text-o"></i>简历管理
+        </div>
+        <div onclick="changeTab('job')" class="nav-item px-3 py-2 rounded-md cursor-pointer hover:bg-gray-700 flex items-center gap-2">
+          <i class="fa fa-user-o"></i>岗位管理
+        </div>
+        <div onclick="changeTab('answer')" class="nav-item px-3 py-2 rounded-md cursor-pointer hover:bg-gray-700 flex items-center gap-2">
+          <i class="fa fa-list-alt"></i>标准题库
+        </div>
+        <div onclick="changeTab('jd')" class="nav-item px-3 py-2 rounded-md cursor-pointer hover:bg-gray-700 flex items-center gap-2">
+          <i class="fa fa-file-code-o"></i>JD管理
+        </div>
+        <div onclick="changeTab('mock')" class="nav-item px-3 py-2 rounded-md cursor-pointer hover:bg-gray-700 flex items-center gap-2">
+          <i class="fa fa-graduation-cap"></i>模拟面试
+        </div>
+        <div onclick="changeTab('interview')" class="nav-item px-3 py-2 rounded-md cursor-pointer hover:bg-gray-700 flex items-center gap-2">
+          <i class="fa fa-comments"></i>正式面试
+        </div>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- 主内容区域 -->
+  <main class="flex-1 overflow-auto">
+    <!-- 顶部导航 -->
+    <header class="bg-white px-6 py-3 border-b flex justify-between items-center">
+      <div>
+        <span class="font-medium">当前空间：<span id="currentSpaceName" class="text-primary">空间 #1</span></span>
+      </div>
+      <div class="flex items-center gap-4">
+        <button class="px-3 py-1 rounded bg-primary text-white text-sm">
+          <i class="fa fa-save mr-1"></i>保存空间配置
+        </button>
+        <div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white">
+          U
+        </div>
+      </div>
+    </header>
+
+    <!-- 页面容器 -->
+    <div class="p-6">
+      <!-- 1. 简历管理页面 -->
+      <div id="page-resume" class="page-content">
+        <div class="bg-white rounded-lg card-shadow p-5">
+          <h2 class="text-lg font-bold mb-4">🧩 模块化可拖拽简历管理</h2>
+          <p class="text-gray-500 text-sm mb-5">支持自由拖拽调整模块位置，编辑简历所有内容</p>
+          <div id="resumeContainer" class="grid grid-cols-2 gap-4">
+            <div class="drag-item border rounded p-4 bg-neutralGray" draggable="true">
+              <h3 class="font-semibold">基础个人信息</h3>
+              <textarea class="w-full mt-2 border rounded p-2 text-sm" rows="3">姓名：xxx｜年限：3年｜学历：本科｜城市：杭州</textarea>
+            </div>
+            <div class="drag-item border rounded p-4 bg-neutralGray" draggable="true">
+              <h3 class="font-semibold">技能栈</h3>
+              <textarea class="w-full mt-2 border rounded p-2 text-sm" rows="3">Java、SpringCloud、MySQL、Redis、分布式、微服务</textarea>
+            </div>
+            <div class="drag-item border rounded p-4 bg-neutralGray" draggable="true">
+              <h3 class="font-semibold">工作经历</h3>
+              <textarea class="w-full mt-2 border rounded p-2 text-sm" rows="4">2022-至今 xxx公司 Java后端开发</textarea>
+            </div>
+            <div class="drag-item border rounded p-4 bg-neutralGray" draggable="true">
+              <h3 class="font-semibold">项目经历</h3>
+              <textarea class="w-full mt-2 border rounded p-2 text-sm" rows="4">分布式订单系统、用户权限平台、实时日志中台</textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. 岗位管理 -->
+      <div id="page-job" class="page-content hidden">
+        <div class="bg-white rounded-lg card-shadow p-5">
+          <h2 class="text-lg font-bold mb-4">💼 当前绑定岗位</h2>
+          <div class="grid grid-cols-2 gap-6">
+            <div>
+              <label class="block text-sm text-gray-600">岗位名称</label>
+              <input class="w-full border rounded px-3 py-2 mt-2" value="Java后端开发">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-600">目标职级</label>
+              <input class="w-full border rounded px-3 py-2 mt-2" value="P6">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-600">期望薪资</label>
+              <input class="w-full border rounded px-3 py-2 mt-2" value="25k-35k">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-600">目标城市</label>
+              <input class="w-full border rounded px-3 py-2 mt-2" value="杭州">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!--3. 自适应标准答案题库 -->
+      <div id="page-answer" class="page-content hidden">
+        <div class="bg-white rounded-lg card-shadow p-5">
+          <h2 class="text-lg font-bold mb-4">📖 标准化面试答案库</h2>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="border rounded p-3">
+              <p class="font-medium">1. 自我介绍</p>
+              <textarea class="w-full mt-2 border rounded text-sm p-2" rows="3">标准结构化自我介绍，可自行编辑，自适应优化话术</textarea>
+            </div>
+            <div class="border rounded p-3">
+              <p class="font-medium">2. 离职/入职原因</p>
+              <textarea class="w-full mt-2 border rounded text-sm p-2" rows="3">客观正向版本，规避踩坑话术，通用面试答案</textarea>
+            </div>
+            <div class="border rounded p-3">
+              <p class="font-medium">3. 优缺点</p>
+              <textarea class="w-full mt-2 border rounded text-sm p-2" rows="3">优点贴合岗位、缺点无害可改进标准回答</textarea>
+            </div>
+            <div class="border rounded p-3">
+              <p class="font-medium">4. 项目难点 & 解决方案</p>
+              <textarea class="w-full mt-2 border rounded text-sm p-2" rows="3">高并发、分布式、性能优化通用标准答案</textarea>
+            </div>
+            <div class="border rounded p-3">
+              <p class="font-medium">5. 熟悉的项目讲解</p>
+              <textarea class="w-full mt-2 border rounded text-sm p-2" rows="3">STAR结构标准话术</textarea>
+            </div>
+            <div class="border rounded p-3">
+              <p class="font-medium">6. HR通用问题库</p>
+              <textarea class="w-full mt-2 border rounded text-sm p-2" rows="3">抗压、加班、长期规划、团队协作题库</textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!--4. JD管理 考点拆解 -->
+      <div id="page-jd" class="page-content hidden">
+        <div class="bg-white rounded-lg card-shadow p-5">
+          <div class="flex justify-between mb-4">
+            <h2 class="text-lg font-bold">📑 多JD管理 & 考点拆解</h2>
+            <button class="px-3 py-1 bg-primary text-white rounded text-sm"><i class="fa fa-plus"></i> 新增JD</button>
+          </div>
+          <div class="border rounded p-4 mb-3">
+            <div class="flex justify-between">
+              <span class="font-medium">阿里-Java后端</span>
+              <span class="text-xs text-gray-400">已拆解考点</span>
+            </div>
+            <div class="mt-3">
+              <p class="text-sm font-semibold">核心考察点：</p>
+              <div class="flex flex-wrap gap-2 mt-2">
+                <span class="bg-blue-100 text-blue-600 px-2 py-1 rounded text-xs">JVM调优</span>
+                <span class="bg-blue-100 text-blue-600 px-2 py-1 rounded text-xs">分布式事务</span>
+                <span class="bg-blue-100 text-blue-600 px-2 py-1 rounded text-xs">MySQL索引</span>
+                <span class="bg-blue-100 text-blue-600 px-2 py-1 rounded text-xs">Redis缓存</span>
+              </div>
+            </div>
+          </div>
+          <div class="border rounded p-4">
+            <div class="flex justify-between">
+              <span class="font-medium">小红书-Java后端</span>
+              <span class="text-xs text-gray-400">已拆解考点</span>
+            </div>
+            <div class="mt-3">
+              <p class="text-sm font-semibold">核心考察点：</p>
+              <div class="flex flex-wrap gap-2 mt-2">
+                <span class="bg-blue-100 text-blue-600 px-2 py-1 rounded text-xs">高并发架构</span>
+                <span class="bg-blue-100 text-blue-600 px-2 py-1 rounded text-xs">消息队列</span>
+                <span class="bg-blue-100 text-blue-600 px-2 py-1 rounded text-xs">限流熔断</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!--5. 模拟面试管理 -->
+      <div id="page-mock" class="page-content hidden">
+        <div class="bg-white rounded-lg card-shadow p-5">
+          <h2 class="text-lg font-bold mb-4">🎯 模拟面试台账</h2>
+          <div class="border rounded p-4 mb-4">
+            <div class="grid grid-cols-3 gap-3 text-sm">
+              <div><span class="text-gray-500">面试时间：</span><input class="border rounded px-2 py-1"></div>
+              <div><span class="text-gray-500">目标公司：</span><input class="border rounded px-2 py-1"></div>
+              <div><span class="text-gray-500">面试Base：</span><input class="border rounded px-2 py-1"></div>
+              <div><span class="text-gray-500">面试轮次：</span><select class="border rounded px-2 py-1"><option>一面</option><option>二面</option><option>三面</option></select></div>
+              <div><span class="text-gray-500">面试类型：</span><select class="border rounded px-2 py-1"><option>技术面</option><option>业务面</option><option>HR面</option></select></div>
+              <div><span class="text-gray-500">综合评分：</span><input class="border rounded px-2 py-1" placeholder="0~100"></div>
+            </div>
+          </div>
+          <!-- 面试复盘区域 -->
+          <div class="border rounded p-4">
+            <p class="font-medium mb-2">面试完整复盘</p>
+            <div class="space-y-3">
+              <div>
+                <p class="text-sm text-gray-500">整体面评</p>
+                <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+              </div>
+              <div>
+                <p class="text-sm text-gray-500">面试题目 | 你的回答 | 回答评价</p>
+                <textarea class="w-full border rounded p-2 text-sm" rows="3"></textarea>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <p class="text-sm text-gray-500">回答优缺点</p>
+                  <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+                </div>
+                <div>
+                  <p class="text-sm text-gray-500">优化改进建议</p>
+                  <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+                </div>
+              </div>
+              <div>
+                <p class="text-sm text-gray-500">标准参考答案</p>
+                <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!--6. 正式面试管理 -->
+      <div id="page-interview" class="page-content hidden">
+        <div class="bg-white rounded-lg card-shadow p-5">
+          <h2 class="text-lg font-bold mb-4">📝 正式面试全流程管理</h2>
+          <!-- 基础信息同模拟面试 -->
+          <div class="border rounded p-4 mb-4">
+            <div class="grid grid-cols-3 gap-3 text-sm">
+              <div><span class="text-gray-500">面试时间：</span><input class="border rounded px-2 py-1"></div>
+              <div><span class="text-gray-500">面试公司：</span><input class="border rounded px-2 py-1"></div>
+              <div><span class="text-gray-500">面试地点/线上：</span><input class="border rounded px-2 py-1"></div>
+              <div><span class="text-gray-500">面试轮次：</span><select class="border rounded px-2 py-1"><option>一面</option><option>二面</option><option>三面</option><option>HR面</option></select></div>
+              <div><span class="text-gray-500">面试分类：</span><select class="border rounded px-2 py-1"><option>技术</option><option>业务</option><option>HR</option></select></div>
+              <div><span class="text-gray-500">当前推断结果：</span><select class="border rounded px-2 py-1"><option>待定</option><option>通过</option><option>挂掉</option></select></div>
+            </div>
+          </div>
+          <!-- 面试总结复盘 -->
+          <div class="border rounded p-4">
+            <p class="font-medium mb-2">面试总结 & 作答复盘</p>
+            <div class="space-y-3">
+              <div>
+                <p class="text-sm text-gray-500">面试官整体评价</p>
+                <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+              </div>
+              <div>
+                <p class="text-sm text-gray-500">原题记录 + 本人作答</p>
+                <textarea class="w-full border rounded p-2 text-sm" rows="3"></textarea>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <p class="text-sm text-gray-500">作答优点</p>
+                  <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+                </div>
+                <div>
+                  <p class="text-sm text-gray-500">作答缺陷</p>
+                  <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+                </div>
+              </div>
+              <div>
+                <p class="text-sm text-gray-500">后续优化方案</p>
+                <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+              </div>
+              <div>
+                <p class="text-sm text-gray-500">精准标准答案存档</p>
+                <textarea class="w-full border rounded p-2 text-sm" rows="2"></textarea>
+              </div>
+              <div>
+                <p class="text-sm text-gray-500">面试最终结果</p>
+                <input class="w-full border rounded p-2 text-sm" placeholder="offer / 挂科 / 进入下一轮">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+  // 页面切换
+  function changeTab(tabName){
+    document.querySelectorAll('.page-content').forEach(item=>{
+      item.classList.add('hidden')
+    })
+    document.getElementById('page-'+tabName).classList.remove('hidden')
+  }
+
+  // 多空间切换
+  function switchSpace(id){
+    document.querySelectorAll('.space-item').forEach(el=>{
+      el.classList.remove('bg-primary/20')
+      el.classList.add('hover:bg-gray-700')
+    })
+    event.target.closest('.space-item').classList.add('bg-primary/20')
+    event.target.closest('.space-item').classList.remove('hover:bg-gray-700')
+    document.getElementById("currentSpaceName").innerText = "空间 #"+id;
+    // 这里可扩展：每个空间独立localStorage存储隔离数据
+  }
+
+  // 新增空间
+  function addSpace(){
+    const len = document.getElementById('spaceList').children.length +1;
+    const div = document.createElement('div');
+    div.className = "space-item rounded-md px-3 py-2 cursor-pointer hover:bg-gray-700";
+    div.onclick = function(){switchSpace(len)};
+    div.innerHTML = `<i class="fa fa-cube mr-2"></i>空间 #${len}`;
+    document.getElementById('spaceList').appendChild(div);
+  }
+
+  // 简单拖拽简历模块实现
+  document.querySelectorAll('.drag-item').forEach(item=>{
+    item.addEventListener('dragstart',e=>{
+      e.dataTransfer.setData("text",e.target.innerHTML)
+    })
+  })
+</script>
+</body>
+</html>
