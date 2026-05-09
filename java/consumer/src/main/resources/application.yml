@@ -1,0 +1,36 @@
+server:
+  port: 8081
+
+spring:
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:MienMieApp}?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:}
+  ai:
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY:}
+      models:
+        audio-transcription: ${DASHSCOPE_ASR_MODEL:paraformer-realtime-v2}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+mienmien:
+  consumer:
+    stream-degraded: false
+  audio:
+    sample-rate: 16000
+    frame-size: 800
+    default-mode: unsupervised
+  enrollment:
+    similarity-threshold: 0.7
+
+websocket:
+  buffer-size: 8192
+  async-timeout: 30000

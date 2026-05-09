@@ -1,0 +1,22 @@
+web/node_modules/
+web/dist/
+.business.log
+.consumer.log
+.web.log
+.dev-pids
+
+# 本地密钥与密钥类文件勿入库
+.env
+.env.*
+!.env.example
+
+# Maven 构建产物
+java/**/target/
+
+# 本地开发报告与归档
+.dev-archives/
+.dev-last-report.md
+
+# 临时恢复/片段草稿
+web/_recovered_interview_script.txt
+web/_snippet_interview_modal.txt
