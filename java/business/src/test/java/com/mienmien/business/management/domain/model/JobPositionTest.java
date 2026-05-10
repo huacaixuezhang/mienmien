@@ -8,12 +8,12 @@ import static org.junit.jupiter.api.Assertions.*;
 class JobPositionTest {
     @Test
     void createNew_rejectsBlankTitle() {
-        assertThrows(DomainException.class, () -> JobPosition.createNew("jp_1", "sp_1", "  ", "c", "l", "r"));
+        assertThrows(DomainException.class, () -> JobPosition.createNew("jp_1", "u_1", "  ", "c", "l", "r"));
     }
 
     @Test
     void markClosed_idempotent() {
-        JobPosition p = JobPosition.createNew("jp_1", "sp_1", "T", "", "", "");
+        JobPosition p = JobPosition.createNew("jp_1", "u_1", "T", "", "", "");
         p.markClosed();
         p.markClosed();
         assertEquals("CLOSED", p.getStatus());

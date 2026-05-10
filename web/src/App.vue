@@ -17,18 +17,32 @@ import {
   recycleSpace,
   restoreSpace,
   listRecycleBinSpaces,
-  createResume,
-  listResumes,
+  createResumeDocumentMine,
+  listResumeDocuments,
+  listAllResumeDocuments,
+  getResumeDocument,
+  getResumeDocumentById,
+  updateResumeDocument,
+  updateResumeDocumentById,
+  deleteResumeDocument,
+  deleteResumeDocumentEntire,
+  linkResumeToSpace,
   createInterview,
   listInterview,
   createJobPosition,
   updateJobPosition,
   listJobPositions,
+  listAllJobPositions,
+  linkJobToSpace,
+  unlinkJobFromSpace,
   closeJobPosition,
   getAnswerBank,
   saveAnswerBank,
   getModelConfig,
   saveModelConfig,
+  testModelConfig,
+  listDbInspectorTables,
+  listDbInspectorTableRows,
   registerByPhone,
   loginByPhone,
   logoutSession,
@@ -52,43 +66,27 @@ const sidebarSpaceNav = [
 
 const sidebarResourceNav = [
   { key: "resume", iconClass: "fa-solid fa-file-lines", label: "简历管理" },
-  { key: "job", iconClass: "fa-solid fa-briefcase", label: "岗位管理" }
+  { key: "job", iconClass: "fa-solid fa-briefcase", label: "岗位管理" },
+  { key: "space-mgmt", iconClass: "fa-solid fa-layer-group", label: "空间管理" }
 ];
 
-/** 侧栏「系统功能」分组 */
-const sidebarSystemNav = [
-  { key: "dashboard", iconClass: "fa-solid fa-gauge-high", label: "仪表盘" },
-  { key: "recycle", iconClass: "fa-solid fa-trash", label: "回收站" },
-  { key: "user", iconClass: "fa-solid fa-user", label: "用户管理" }
-];
+/** 允许查看「库表看板」的手机号（与后端 DbInspectorApplicationService 一致）。 */
+const DB_INSPECTOR_ALLOWED_PHONE = "19955347072";
 
-const platformNavOpen = ref(false);
+const sidebarSystemNav = computed(() => {
+  const items = [
+    { key: "dashboard", iconClass: "fa-solid fa-gauge-high", label: "仪表盘" },
+    { key: "recycle", iconClass: "fa-solid fa-trash", label: "回收站" },
+    { key: "user", iconClass: "fa-solid fa-user", label: "用户管理" },
+    { key: "config", iconClass: "fa-solid fa-sliders", label: "系统设置" }
+  ];
+  if (currentUser.value?.phone === DB_INSPECTOR_ALLOWED_PHONE) {
+    items.push({ key: "db-inspector", iconClass: "fa-solid fa-database", label: "库表看板" });
+  }
+  return items;
+});
 
 const activeTab = ref("resume");
-
-/** 平台配置父行：在「系统设置」页或展开子菜单时给予弱/强高亮 */
-const platformParentButtonClass = computed(() => {
-  const onConfig = activeTab.value === "config";
-  const open = platformNavOpen.value;
-  const base =
-    "flex w-full items-center px-3 py-2.5 text-left text-sm rounded-md transition-colors border-l-4";
-  if (onConfig) {
-    return `${base} border-primary bg-blue-50 font-medium text-primary`;
-  }
-  if (open) {
-    return `${base} border-transparent bg-gray-50 text-gray-800 hover:bg-gray-100`;
-  }
-  return `${base} border-transparent text-gray-600 hover:bg-gray-100 hover:text-primary`;
-});
-
-const platformChevronClass = computed(() => {
-  const emphasize = activeTab.value === "config" || platformNavOpen.value;
-  return [
-    "fa-solid shrink-0 text-xs",
-    platformNavOpen.value ? "fa-chevron-up" : "fa-chevron-down",
-    emphasize ? "text-primary" : "text-gray-400"
-  ].join(" ");
-});
 const spaces = ref([]);
 const recycleBinSpaces = ref([]);
 const currentSpaceId = ref("");
@@ -103,11 +101,70 @@ const addingSpace = ref(false);
 const showAddSpaceModal = ref(false);
 const showRenameSpaceModal = ref(false);
 const renameTargetSpaceId = ref("");
+/** 详情编辑时锁定所属空间，避免聚合列表中 resumeId 歧义 */
+const resumeEditingSpaceId = ref("");
+/** 空间管理：各空间下的简历与岗位快照 */
+const spaceMgmtLoading = ref(false);
+const spaceMgmtRows = ref([]);
+/** 空间管理：从「简历管理 / 岗位管理」聚合列表选择条目，在本空间建立绑定（弹窗） */
+const showSpaceMgmtBindModal = ref(false);
+const spaceMgmtBindKind = ref("");
+const spaceMgmtBindTargetSpaceId = ref("");
+const spaceMgmtBindPickLoading = ref(false);
+/** { spaceId, name, items: [] } */
+const spaceMgmtBindPickGroups = ref([]);
+const spaceMgmtBindActionLoading = ref(false);
+/** 空间管理：简历只读详情弹窗 */
+const spaceMgmtResumeDetailOpen = ref(false);
+const spaceMgmtResumeDetailLoading = ref(false);
+/** 当前展示的简历文档（getResumeDocument 返回） */
+const spaceMgmtResumeDetailDoc = ref(null);
+const spaceMgmtResumeDetailSpaceLabel = ref("");
 
 const currentSpace = computed(() => spaces.value.find((x) => x.spaceId === currentSpaceId.value) || null);
 
+const spaceNameLookup = computed(() => {
+  const m = {};
+  for (const s of spaces.value || []) {
+    if (s?.spaceId) m[s.spaceId] = (s.name || "").trim() || s.spaceId;
+  }
+  return m;
+});
+
+function spaceDisplayName(spaceId) {
+  if (!spaceId) return "—";
+  return spaceNameLookup.value[spaceId] || spaceId;
+}
+
+function activeJobsInMgmtRow(jobList) {
+  return (Array.isArray(jobList) ? jobList : []).filter((j) => (j.status || "ACTIVE") === "ACTIVE");
+}
+
+function openRenameForSpaceRow(sp) {
+  if (!sp?.spaceId) return;
+  resetPanelModalDrag();
+  renameTargetSpaceId.value = sp.spaceId;
+  renameSpaceName.value = sp.name || "";
+  showRenameSpaceModal.value = true;
+}
+
 const resumeBlocks = reactive([]);
-const resumeVersion = ref(1);
+/** 简历模块列表项的稳定 key，禁止用 title 作 key（编辑标题会导致整卡重挂载、失焦与内容异常） */
+function newResumeBlockId() {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `rb-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+/** 当前选中的简历（服务端 resumeId）；仅在详情页编辑时使用 */
+const selectedResumeId = ref("");
+/** 简历管理：list = 卡片列表；detail = 某份简历的模块详情 */
+const resumeUiPhase = ref("list");
+/** 简历展示名（与模块一并持久化到 mm_resume_document） */
+const resumeDisplayName = ref("");
+/** 与上次保存一致的 JSON 快照，用于判断草稿是否变更 */
+const resumeDraftBaseline = ref("");
+const creatingResume = ref(false);
+const resumeSaveLoading = ref(false);
 const draggingResumeIndex = ref(-1);
 const newResumeBlockTitle = ref("");
 const deletedBlockBackup = ref(null);
@@ -137,6 +194,8 @@ const jobSearchQuery = ref("");
 const jobModalOpen = ref(false);
 const jobModalMode = ref("add");
 const jobModalId = ref("");
+/** 新增/编辑岗位所属空间（聚合列表下与「当前工作空间」解耦） */
+const jobModalTargetSpaceId = ref("");
 const jobModalDirty = ref(false);
 const jobModalSaving = ref(false);
 /** 各居中弹窗共用：标题栏拖拽位移（同时只会有一个弹窗打开） */
@@ -217,12 +276,23 @@ const questionDraft = reactive({
 
 const sidebarOpen = ref(false);
 
-watch(activeTab, (k) => {
-  if (k === "config") platformNavOpen.value = true;
-});
-
 const resumes = ref([]);
 const jobs = ref([]);
+
+const sortedResumeList = computed(() =>
+  [...(Array.isArray(resumes.value) ? resumes.value : [])].sort((a, b) => {
+    const ta = Date.parse(a.updatedAt || a.createdAt || 0) || 0;
+    const tb = Date.parse(b.updatedAt || b.createdAt || 0) || 0;
+    return tb - ta;
+  })
+);
+
+const selectedResumeRow = computed(() => {
+  const id = selectedResumeId.value;
+  if (!id) return null;
+  const list = Array.isArray(resumes.value) ? resumes.value : [];
+  return list.find((r) => String(r.resumeId) === String(id)) || null;
+});
 
 const activeJobsList = computed(() =>
   (jobs.value || []).filter((j) => (j.status || "ACTIVE") === "ACTIVE")
@@ -242,15 +312,25 @@ const filteredJobsList = computed(() => {
 });
 
 const interviews = ref([]);
+/** 开发环境预填百炼 Anthropic 网关与模型名，便于联调；API Key 勿写入代码，本地自行粘贴或使用 Mock。 */
 const modelConfig = reactive({
   provider: "aliyun-bailian",
-  baseUrl: "",
+  baseUrl: import.meta.env.DEV ? "https://coding.dashscope.aliyuncs.com/apps/anthropic" : "",
   apiKey: "",
-  modelName: "",
+  modelName: import.meta.env.DEV ? "qwen3.6-plus" : "",
   testPrompt: "请输出一句“连接测试成功”"
 });
 const testingModelConfig = ref(false);
+const showBailianApiKey = ref(true);
 const modelConfigTestResult = ref("");
+const dbInspectorLoading = ref(false);
+const dbInspectorTables = ref([]);
+const dbInspectorSelectedTable = ref("");
+const dbInspectorColumns = ref([]);
+const dbInspectorRows = ref([]);
+const dbInspectorRowCount = ref(0);
+const dbInspectorOffset = ref(0);
+const dbInspectorLimit = ref(100);
 const userForm = reactive({
   registerPhone: "",
   registerPassword: "",
@@ -561,12 +641,14 @@ function tabTitle(key) {
     dashboard: "仪表盘",
     resume: "简历管理",
     job: "岗位管理",
+    "space-mgmt": "空间管理",
     answer: "标准题库",
     mock: "模拟面试",
     interview: "正式面试",
     recycle: "回收站",
     config: "系统设置",
-    user: "用户管理"
+    user: "用户管理",
+    "db-inspector": "库表看板"
   };
   return m[key] || "";
 }
@@ -580,10 +662,6 @@ function sidebarNavButtonClass(key, opts = {}) {
   return `flex w-full items-center gap-0 ${pad} py-2.5 text-left text-sm rounded-md transition-colors border-l-4 ${tone}`;
 }
 
-function togglePlatformNav() {
-  platformNavOpen.value = !platformNavOpen.value;
-}
-
 function showToast(message, type = "info") {
   const id = ++toastSeq;
   toasts.value.push({ id, message, type });
@@ -593,7 +671,11 @@ function showToast(message, type = "info") {
 }
 
 function syncJobFormFromFirstJob() {
-  const j = jobs.value.find((x) => (x.status || "ACTIVE") === "ACTIVE");
+  const list = (jobs.value || []).filter((j) => (j.status || "ACTIVE") === "ACTIVE");
+  const scoped = currentSpaceId.value
+    ? list.filter((j) => rowSpaceIds(j).includes(String(currentSpaceId.value)))
+    : list;
+  const j = scoped[0] || list[0];
   if (!j) {
     jobForm.title = "";
     jobForm.company = "";
@@ -642,6 +724,7 @@ function buildJobBaseRangeFromDraft() {
 
 function openJobDetailModal(row) {
   if (!row) return;
+  if (spaceMgmtResumeDetailOpen.value) closeSpaceMgmtResumeDetail();
   resetPanelModalDrag();
   const d = decodeJobBaseRange(row.baseRange);
   jobDetailView.title = row.title || "";
@@ -667,6 +750,7 @@ function openAddJobModal() {
   }
   jobModalMode.value = "add";
   jobModalId.value = "";
+  jobModalTargetSpaceId.value = currentSpaceId.value || "";
   jobModalDirty.value = false;
   jobModalJdPaste.value = "";
   Object.assign(jobModalDraft, {
@@ -690,6 +774,7 @@ function openEditJobModal(row) {
   }
   jobModalMode.value = "edit";
   jobModalId.value = row.positionId || "";
+  jobModalTargetSpaceId.value = pickLinkedSpaceIdForApi(row) || currentSpaceId.value || "";
   const d = decodeJobBaseRange(row.baseRange);
   jobModalJdPaste.value = "";
   Object.assign(jobModalDraft, {
@@ -796,10 +881,7 @@ function closeJobModal() {
 }
 
 async function submitJobModal() {
-  if (!currentSpaceId.value) {
-    showToast("请先选择工作空间", "error");
-    return;
-  }
+  const targetSpace = (jobModalTargetSpaceId.value || currentSpaceId.value || "").trim();
   const title = (jobModalDraft.title || "").trim();
   const company = (jobModalDraft.company || "").trim();
   const location = (jobModalDraft.location || "").trim();
@@ -815,16 +897,12 @@ async function submitJobModal() {
       await updateJobPosition(jobModalId.value, { title, company, location, baseRange });
       showToast("岗位已更新", "success");
     } else {
-      await createJobPosition({
-        spaceId: currentSpaceId.value,
-        title,
-        company,
-        location,
-        baseRange
-      });
+      const payload = { title, company, location, baseRange };
+      if (targetSpace) payload.spaceId = targetSpace;
+      await createJobPosition(payload);
       showToast("岗位已创建", "success");
     }
-    jobs.value = await listJobPositions(currentSpaceId.value);
+    await loadAggregatedJobs();
     syncJobFormFromFirstJob();
     closeJobModal();
   } catch (e) {
@@ -835,12 +913,15 @@ async function submitJobModal() {
 }
 
 function formatJobDate(iso) {
-  if (!iso || typeof iso !== "string") return "—";
-  return iso.split("T")[0] || "—";
+  if (iso == null || iso === "") return "—";
+  const s = typeof iso === "string" ? iso : String(iso);
+  return s.split("T")[0] || "—";
 }
 
 function openImportJd() {
-  const list = activeJobsList.value;
+  const list = activeJobsList.value.filter(
+    (j) => !currentSpaceId.value || rowSpaceIds(j).includes(String(currentSpaceId.value))
+  );
   if (list.length === 0) {
     showToast("请先添加岗位，再在「编辑岗位」中粘贴 JD 或使用一键拆解考点。", "info");
     return;
@@ -868,7 +949,7 @@ async function confirmDeleteJob() {
   jobDeleteLoading.value = true;
   try {
     await closeJobPosition(id);
-    jobs.value = await listJobPositions(currentSpaceId.value);
+    await loadAggregatedJobs();
     syncJobFormFromFirstJob();
     showToast("岗位已删除", "success");
   } catch (e) {
@@ -887,12 +968,71 @@ async function refreshSpaces() {
   }
 }
 
+/** 简历正文首行元数据，与模块「【标题】」区分，避免单独加表 */
+const RESUME_META_PREFIX = "MMIEN_RESUME_META:";
+
+function parseResumeContentPackage(raw) {
+  const trimmed = (raw || "").trim();
+  let displayName = "";
+  let blocksPart = trimmed;
+  if (trimmed.startsWith(RESUME_META_PREFIX)) {
+    const nl = trimmed.indexOf("\n");
+    const metaLine = nl >= 0 ? trimmed.slice(0, nl) : trimmed;
+    try {
+      const jsonStr = metaLine.slice(RESUME_META_PREFIX.length).trim();
+      const o = JSON.parse(jsonStr);
+      if (typeof o.name === "string") displayName = o.name.trim();
+    } catch {
+      /* 忽略损坏的元数据行 */
+    }
+    blocksPart = nl >= 0 ? trimmed.slice(nl + 1).replace(/^\n+/, "").trim() : "";
+  }
+  return { displayName, blocksPart };
+}
+
+function deriveDefaultResumeNameFromBlocksPart(blocksPart) {
+  const t = (blocksPart || "").trim();
+  if (!t) return "未命名简历";
+  const firstChunk = t.split("\n\n").find((c) => c.trim()) || "";
+  const line1 = (firstChunk.split("\n")[0] || "").trim();
+  if (line1.startsWith("【") && line1.endsWith("】")) {
+    const inner = line1.slice(1, -1).trim();
+    if (inner) return inner.length > 40 ? `${inner.slice(0, 40)}…` : inner;
+  }
+  return "未命名简历";
+}
+
+function resumeRowPrimaryTitle(row) {
+  if (!row) return "简历";
+  if ((row.name || "").trim()) return row.name.trim();
+  if (Array.isArray(row.modules) && row.modules.length > 0) {
+    const t = (row.modules[0].title || "").trim();
+    if (t) return t.length > 40 ? `${t.slice(0, 40)}…` : t;
+  }
+  const { displayName, blocksPart } = parseResumeContentPackage(row.content || "");
+  return (displayName || deriveDefaultResumeNameFromBlocksPart(blocksPart)) || "未命名简历";
+}
+
 function resumeBindLabel(row) {
   if (!row) return "简历";
-  const raw = (row.content || "").trim();
-  if (!raw) return `简历 · v${row.version || 1}`;
-  const first = raw.split(/\n/)[0].replace(/^【|】$/g, "").trim();
-  return first.length > 40 ? `${first.slice(0, 40)}…` : first || `简历 · v${row.version || 1}`;
+  return resumeRowPrimaryTitle(row);
+}
+
+/** 简历关联的空间 id 列表（兼容旧接口仅有 spaceId） */
+function rowSpaceIds(row) {
+  if (!row) return [];
+  if (Array.isArray(row.spaceIds) && row.spaceIds.length) return row.spaceIds.map(String);
+  if (row.spaceId) return [String(row.spaceId)];
+  return [];
+}
+
+/** 调用需 spaceId 路径的接口时，优先当前工作空间，否则取 row 的首个关联空间（简历/岗位共用） */
+function pickLinkedSpaceIdForApi(row) {
+  if (!row) return "";
+  const ids = rowSpaceIds(row);
+  const cur = String(currentSpaceId.value || "");
+  if (cur && ids.includes(cur)) return cur;
+  return ids[0] || "";
 }
 
 function jobBindLabel(row) {
@@ -913,11 +1053,11 @@ function toggleNewSpaceBindJob(positionId) {
 async function loadBindSourceResources() {
   bindSourceResumes.value = [];
   bindSourceJobs.value = [];
-  const src = currentSpaceId.value;
-  if (!src || !currentUser.value) return;
+  if (!currentUser.value) return;
   try {
-    bindSourceResumes.value = await listResumes(src);
-    const list = await listJobPositions(src);
+    const listed = await listAllResumeDocuments();
+    bindSourceResumes.value = Array.isArray(listed) ? listed : [];
+    const list = await listAllJobPositions();
     bindSourceJobs.value = (list || []).filter((j) => (j.status || "ACTIVE") === "ACTIVE");
   } catch {
     /* 列表失败时仍可仅创建空空间 */
@@ -931,7 +1071,6 @@ async function addSpace() {
     return;
   }
   if (addingSpace.value) return;
-  const sourceSpace = currentSpaceId.value;
   addingSpace.value = true;
   try {
     const created = await createSpace({ name });
@@ -939,26 +1078,16 @@ async function addSpace() {
     if (!newId) {
       throw new Error("创建空间未返回 spaceId");
     }
-    if (newSpaceBindResumeId.value && sourceSpace) {
-      const r = bindSourceResumes.value.find((x) => x.resumeId === newSpaceBindResumeId.value);
+    if (newSpaceBindResumeId.value) {
+      const r = bindSourceResumes.value.find((x) => String(x.resumeId) === String(newSpaceBindResumeId.value));
       if (r) {
-        await createResume({
-          spaceId: newId,
-          content: r.content || "",
-          version: 1
-        });
+        await linkResumeToSpace(newId, r.resumeId);
       }
     }
     for (const jid of [...newSpaceBindJobIds.value]) {
       const j = bindSourceJobs.value.find((x) => x.positionId === jid);
       if (j) {
-        await createJobPosition({
-          spaceId: newId,
-          title: (j.title || "").trim() || "未命名岗位",
-          company: j.company || "",
-          location: j.location || "",
-          baseRange: j.baseRange || ""
-        });
+        await linkJobToSpace(newId, j.positionId);
       }
     }
     newSpaceName.value = "";
@@ -992,10 +1121,264 @@ async function doRenameSpace() {
   resetPanelModalDrag();
   showRenameSpaceModal.value = false;
   await refreshSpaces();
+  if (activeTab.value === "space-mgmt") {
+    await loadSpaceManagementOverview();
+  }
+}
+
+function buildResumeContentFromBlocks() {
+  return resumeBlocks.map((b) => `【${b.title}】\n${b.text}`).join("\n\n");
+}
+
+/** 与后端 `UpsertResumeDocumentRequest` 对齐的快照，用于脏检测与保存 */
+function serializeResumeDraft() {
+  const name = (resumeDisplayName.value || "").trim() || "未命名简历";
+  const modules = resumeBlocks.map((b) => ({
+    id: String(b.id || newResumeBlockId()),
+    title: b.title ?? "",
+    text: b.text ?? ""
+  }));
+  if (modules.length === 0) {
+    modules.push({ id: newResumeBlockId(), title: "模块1", text: "" });
+  }
+  return JSON.stringify({ name, modules });
+}
+
+/** 将编辑器恢复为上次保存快照（用于「放弃修改」） */
+function revertResumeEditorToBaseline() {
+  const raw = (resumeDraftBaseline.value || "").trim();
+  if (!raw) {
+    clearUndoState();
+    return;
+  }
+  try {
+    const data = JSON.parse(raw);
+    resumeDisplayName.value = (data.name || "").trim() || "未命名简历";
+    const mods = Array.isArray(data.modules) ? data.modules : [];
+    resumeBlocks.splice(
+      0,
+      resumeBlocks.length,
+      ...mods.map((m) => ({
+        id: m.id || newResumeBlockId(),
+        title: m.title ?? "未命名模块",
+        text: m.text ?? ""
+      }))
+    );
+    if (resumeBlocks.length === 0) {
+      resumeBlocks.push({ id: newResumeBlockId(), title: "模块1", text: "" });
+    }
+  } catch {
+    /* ignore */
+  }
+  clearUndoState();
+}
+
+function isResumeDetailDirty() {
+  return resumeUiPhase.value === "detail" && serializeResumeDraft() !== resumeDraftBaseline.value;
+}
+
+/**
+ * 离开简历详情前：若有未保存修改则提示保存或放弃。
+ * @returns 是否允许继续离开（保存成功、无修改、或用户确认放弃）
+ */
+async function confirmResumeDetailLeave() {
+  if (!isResumeDetailDirty()) return true;
+  const saveFirst = confirm(
+    "当前简历有未保存的修改。\n\n「确定」= 保存后再离开\n「取消」= 下一步（不保存或继续编辑）"
+  );
+  if (saveFirst) {
+    try {
+      await saveResume();
+      return true;
+    } catch (e) {
+      showToast(e?.message || "保存失败", "error");
+      return false;
+    }
+  }
+  const discard = confirm(
+    "确定放弃未保存的修改并离开？\n\n「确定」= 放弃修改并离开\n「取消」= 留在本页继续编辑"
+  );
+  if (!discard) return false;
+  revertResumeEditorToBaseline();
+  return true;
+}
+
+function onResumeBeforeUnload(e) {
+  if (!isResumeDetailDirty()) return;
+  e.preventDefault();
+  e.returnValue = "";
+}
+
+function parseContentIntoResumeBlocks(rawContent) {
+  resumeBlocks.splice(0, resumeBlocks.length);
+  clearUndoState();
+  const { displayName, blocksPart } = parseResumeContentPackage(rawContent);
+  resumeDisplayName.value = displayName || deriveDefaultResumeNameFromBlocksPart(blocksPart);
+  const trimmed = (blocksPart || "").trim();
+  if (!trimmed) {
+    resumeBlocks.push({ id: newResumeBlockId(), title: "模块1", text: "" });
+    return;
+  }
+  const chunks = trimmed.split("\n\n").filter((c) => c.trim());
+  chunks.forEach((chunk, idx) => {
+    const lines = chunk.split("\n");
+    const titleLine = (lines[0] || "").trim();
+    const title = titleLine.startsWith("【") && titleLine.endsWith("】")
+      ? titleLine.slice(1, -1)
+      : `模块${idx + 1}`;
+    const text = lines.slice(1).join("\n");
+    resumeBlocks.push({ id: newResumeBlockId(), title, text });
+  });
+}
+
+function hydrateResumeFromRow(row) {
+  if (!row) {
+    selectedResumeId.value = "";
+    resumeEditingSpaceId.value = "";
+    resumeDisplayName.value = "";
+    resumeBlocks.splice(0, resumeBlocks.length);
+    resumeDraftBaseline.value = "";
+    clearUndoState();
+    return;
+  }
+  selectedResumeId.value = String(row.resumeId);
+  resumeEditingSpaceId.value = pickLinkedSpaceIdForApi(row);
+  if (Array.isArray(row.modules) && row.modules.length > 0) {
+    resumeDisplayName.value = (row.name || "").trim() || "未命名简历";
+    resumeBlocks.splice(
+      0,
+      resumeBlocks.length,
+      ...row.modules.map((m) => ({
+        id: m.id || newResumeBlockId(),
+        title: m.title ?? "未命名模块",
+        text: m.text ?? ""
+      }))
+    );
+  } else {
+    parseContentIntoResumeBlocks(row.content || "");
+    if ((row.name || "").trim()) {
+      resumeDisplayName.value = row.name.trim();
+    }
+  }
+  resumeDraftBaseline.value = serializeResumeDraft();
+  clearUndoState();
+}
+
+function resumeUpdatedLabel(row) {
+  const raw = row?.updatedAt || row?.createdAt;
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+async function refreshCurrentResumeDetailFromServer() {
+  if (!selectedResumeId.value) return;
+  const doc = await getResumeDocumentById(selectedResumeId.value);
+  hydrateResumeFromRow(doc);
+}
+
+async function openResumeDetail(row) {
+  if (!row?.resumeId) return;
+  if (resumeUiPhase.value === "detail") {
+    if (String(selectedResumeId.value) === String(row.resumeId)) {
+      return;
+    }
+    if (!(await confirmResumeDetailLeave())) return;
+  }
+  resumeSaveLoading.value = true;
+  try {
+    const doc = await getResumeDocumentById(row.resumeId);
+    hydrateResumeFromRow(doc);
+    resumeUiPhase.value = "detail";
+  } catch (e) {
+    showToast(e?.message || "加载简历失败", "error");
+  } finally {
+    resumeSaveLoading.value = false;
+  }
+}
+
+async function backToResumeList() {
+  if (!(await confirmResumeDetailLeave())) return;
+  resumeUiPhase.value = "list";
+  hydrateResumeFromRow(null);
+  await loadSpaceData();
+}
+
+async function confirmDeleteResumeDoc(row, ev) {
+  ev?.stopPropagation?.();
+  if (!row?.resumeId) return;
+  const title = resumeRowPrimaryTitle(row);
+  if (!confirm(`确定删除简历「${title}」？将从所有已关联空间移除且不可恢复。`)) return;
+  try {
+    await deleteResumeDocumentEntire(row.resumeId);
+    showToast("已删除", "success");
+    if (String(selectedResumeId.value) === String(row.resumeId) && resumeUiPhase.value === "detail") {
+      resumeUiPhase.value = "list";
+      hydrateResumeFromRow(null);
+    }
+    await loadAggregatedResumes();
+  } catch (e) {
+    showToast(e?.message || "删除失败", "error");
+  }
+}
+
+async function deleteCurrentResumeFromDetail() {
+  if (!(await confirmResumeDetailLeave())) return;
+  const row = selectedResumeRow.value;
+  if (!row?.resumeId) return;
+  await confirmDeleteResumeDoc(row);
+}
+
+function resumeModuleCount(row) {
+  if (!row) return 0;
+  if (Array.isArray(row.modules)) return row.modules.length;
+  const { blocksPart } = parseResumeContentPackage(row.content || "");
+  const t = (blocksPart || "").trim();
+  if (!t) return 0;
+  return t.split("\n\n").filter((c) => c.trim()).length;
+}
+
+function resumeCardPreview(row) {
+  if (!row) return "（暂无模块正文）";
+  if (Array.isArray(row.modules) && row.modules.length > 0) {
+    const t = (row.modules.map((m) => (m.text || "").trim()).find(Boolean) || "").replace(/\s+/g, " ").trim();
+    if (!t) return "（暂无模块正文）";
+    return t.length > 96 ? `${t.slice(0, 96)}…` : t;
+  }
+  const { blocksPart } = parseResumeContentPackage(row.content || "");
+  const t = (blocksPart || "").replace(/\s+/g, " ").trim();
+  if (!t) return "（暂无模块正文）";
+  return t.length > 96 ? `${t.slice(0, 96)}…` : t;
+}
+
+async function createNewResumeDoc() {
+  if (creatingResume.value) return;
+  if (!(await confirmResumeDetailLeave())) return;
+  creatingResume.value = true;
+  try {
+    const list = Array.isArray(resumes.value) ? resumes.value : [];
+    const initialName = `简历 ${list.length + 1}`;
+    const modules = [{ id: newResumeBlockId(), title: "基本信息", text: "" }];
+    const body = { name: initialName, modules };
+    if (currentSpaceId.value) body.spaceId = currentSpaceId.value;
+    const created = await createResumeDocumentMine(body);
+    await loadAggregatedResumes();
+    resumeUiPhase.value = "detail";
+    hydrateResumeFromRow(created);
+    showToast("已创建，请在详情页编辑模块", "success");
+  } catch (e) {
+    showToast(e?.message || "创建简历失败", "error");
+  } finally {
+    creatingResume.value = false;
+  }
 }
 
 async function openAddSpaceModal() {
   resetPanelModalDrag();
+  if (activeTab.value === "resume" && resumeUiPhase.value === "detail" && currentSpaceId.value && currentUser.value) {
+    if (!(await confirmResumeDetailLeave())) return;
+  }
   newSpaceName.value = "";
   newSpaceBindResumeId.value = "";
   newSpaceBindJobIds.value = [];
@@ -1012,7 +1395,10 @@ function closeAddSpaceModal() {
   newSpaceBindJobIds.value = [];
 }
 
-function openRenameSpaceModal() {
+async function openRenameSpaceModal() {
+  if (activeTab.value === "resume" && resumeUiPhase.value === "detail") {
+    if (!(await confirmResumeDetailLeave())) return;
+  }
   if (!currentSpace.value) {
     alert("请先选择空间");
     return;
@@ -1030,21 +1416,47 @@ function closeRenameSpaceModal() {
   renameSpaceName.value = "";
 }
 
-function switchSpace(spaceId) {
+async function switchSpace(spaceId) {
+  if (!spaceId) return;
+  if (String(spaceId) === String(currentSpaceId.value)) {
+    sidebarOpen.value = false;
+    return;
+  }
+  if (!(await confirmResumeDetailLeave())) return;
   currentSpaceId.value = spaceId;
   sidebarOpen.value = false;
   resetTransientDrafts();
+  resumes.value = [];
+  selectedResumeId.value = "";
+  resumeDisplayName.value = "";
+  resumeDraftBaseline.value = "";
+  resumeBlocks.splice(0, resumeBlocks.length);
+  clearUndoState();
+  resumeUiPhase.value = "list";
   loadSpaceData();
 }
 
-async function moveCurrentSpaceToRecycleBin() {
-  if (!currentSpaceId.value) return;
-  if (!confirm("确认删除当前空间？删除后将进入回收站，30天后自动清除。")) return;
-  await recycleSpace(currentSpaceId.value);
-  currentSpaceId.value = "";
-  await refreshSpaces();
-  activeTab.value = "recycle";
-  await loadSpaceData();
+async function moveSpaceToRecycleBin(spaceId) {
+  if (!spaceId) return;
+  if (!(await confirmResumeDetailLeave())) return;
+  const label = spaceDisplayName(spaceId);
+  if (!confirm(`确认将空间「${label}」移入回收站？\n空间将进入回收站，30天后自动清除。`)) return;
+  closeSpaceMgmtBindModal();
+  closeSpaceMgmtResumeDetail();
+  if (jobDetailModalOpen.value) closeJobDetailModal();
+  try {
+    await recycleSpace(spaceId);
+    const wasCurrent = String(currentSpaceId.value) === String(spaceId);
+    if (wasCurrent) {
+      currentSpaceId.value = "";
+    }
+    await refreshSpaces();
+    activeTab.value = "recycle";
+    await loadSpaceData();
+    showToast("空间已移入回收站", "success");
+  } catch (e) {
+    showToast(e?.message || "操作失败", "error");
+  }
 }
 
 async function restoreFromRecycleBin(spaceId) {
@@ -1055,20 +1467,40 @@ async function restoreFromRecycleBin(spaceId) {
   await loadSpaceData();
 }
 
-function switchTab(key) {
+async function switchTab(key) {
   if (!currentUser.value && key !== "user") {
     resetPanelModalDrag();
     showAuthModal.value = true;
     switchAccountInline.value = false;
     return;
   }
+  if (key === "db-inspector" && currentUser.value?.phone !== DB_INSPECTOR_ALLOWED_PHONE) {
+    showToast("无权访问库表看板", "warning");
+    return;
+  }
+  if (key === "resume" && activeTab.value === "resume" && resumeUiPhase.value === "detail") {
+    if (!(await confirmResumeDetailLeave())) return;
+    resumeUiPhase.value = "list";
+    hydrateResumeFromRow(null);
+    sidebarOpen.value = false;
+    loadSpaceData();
+    return;
+  }
+  if (activeTab.value === "resume" && resumeUiPhase.value === "detail" && key !== "resume") {
+    if (!(await confirmResumeDetailLeave())) return;
+    resumeUiPhase.value = "list";
+    hydrateResumeFromRow(null);
+  }
+  if (key === "resume") {
+    resumeUiPhase.value = "list";
+  }
   activeTab.value = key;
   sidebarOpen.value = false;
   loadSpaceData();
 }
 
-function openConfigPage() {
-  switchTab("config");
+async function openConfigPage() {
+  await switchTab("config");
 }
 
 /** 关闭全局登录弹窗（点击遮罩或关闭按钮）；未登录时仍可点「用户管理」进入登录页 */
@@ -1185,6 +1617,7 @@ async function loginUser() {
 }
 
 async function logoutUser() {
+  if (!(await confirmResumeDetailLeave())) return;
   try {
     await logoutSession();
   } catch {
@@ -1211,6 +1644,7 @@ function maskSessionTail(token) {
 
 /** 留在用户管理页，仅清会话与本地态，便于在本页用另一手机号注册/登录 */
 async function switchToOtherAccount() {
+  if (!(await confirmResumeDetailLeave())) return;
   try {
     await logoutSession();
   } catch {
@@ -1227,76 +1661,263 @@ async function switchToOtherAccount() {
   activeTab.value = "user";
 }
 
+function pickModelConfigString(config, camel, snake) {
+  const v = config?.[camel];
+  if (v != null && String(v).trim() !== "") return String(v);
+  const s = config?.[snake];
+  if (s != null && String(s).trim() !== "") return String(s);
+  return "";
+}
+
 async function loadBailianConfig() {
-  if (!currentSpaceId.value) return;
-  const config = await getModelConfig(currentSpaceId.value);
-  modelConfig.provider = config.provider || "aliyun-bailian";
-  modelConfig.baseUrl = config.baseUrl || "";
-  modelConfig.apiKey = config.apiKey || "";
-  modelConfig.modelName = config.modelName || "";
+  if (!currentUser.value) return;
+  const config = await getModelConfig();
+  modelConfig.provider = (config.provider && String(config.provider).trim()) || "aliyun-bailian";
+  modelConfig.baseUrl = pickModelConfigString(config, "baseUrl", "base_url");
+  modelConfig.apiKey = pickModelConfigString(config, "apiKey", "api_key");
+  modelConfig.modelName = pickModelConfigString(config, "modelName", "model_name");
 }
 
 async function saveBailianConfig() {
-  if (!currentSpaceId.value) {
-    alert("请先选择空间");
+  if (!currentUser.value) {
+    alert("请先登录");
     return;
   }
   await saveModelConfig({
-    spaceId: currentSpaceId.value,
     provider: modelConfig.provider || "aliyun-bailian",
     baseUrl: modelConfig.baseUrl.trim(),
     apiKey: modelConfig.apiKey.trim(),
     modelName: modelConfig.modelName.trim()
   });
-  alert("百炼连接配置已保存到后端");
+  alert("百炼连接配置已保存到后端（当前账号下全部空间共享）");
 }
 
-function resolveChatCompletionsUrl(baseUrl) {
+/** 百炼 Anthropic 应用网关（Coding Plan / 按量等），官方路径为 POST .../apps/anthropic/v1/messages */
+function isAnthropicAppsGatewayBase(baseUrl) {
+  return /\/apps\/anthropic(\/|$)/i.test(baseUrl.trim());
+}
+
+function resolveAnthropicAppsMessagesUrl(baseUrl) {
+  let t = baseUrl.trim().replace(/\/+$/, "");
+  if (!t) return "";
+  if (/\/v1\/messages$/i.test(t)) return t;
+  if (t.endsWith("/chat/completions")) {
+    t = t.slice(0, -"/chat/completions".length);
+  }
+  if (/\/v1$/i.test(t)) {
+    t = t.slice(0, -"/v1".length);
+  }
+  return `${t}/v1/messages`;
+}
+
+/** OpenAI 兼容模式用 .../compatible-mode/v1 + /chat/completions；Anthropic 网关用 .../apps/anthropic + /v1/messages */
+function resolveBailianInvoke(baseUrl) {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  if (!trimmed) return "";
-  if (trimmed.endsWith("/chat/completions")) return trimmed;
-  if (trimmed.endsWith("/v1")) return `${trimmed}/chat/completions`;
-  return `${trimmed}/chat/completions`;
+  if (!trimmed) return { mode: null, url: "" };
+  if (isAnthropicAppsGatewayBase(trimmed)) {
+    return { mode: "anthropic", url: resolveAnthropicAppsMessagesUrl(trimmed) };
+  }
+  if (trimmed.endsWith("/chat/completions")) {
+    return { mode: "openai-chat", url: trimmed };
+  }
+  if (trimmed.endsWith("/v1")) {
+    return { mode: "openai-chat", url: `${trimmed}/chat/completions` };
+  }
+  return { mode: "openai-chat", url: `${trimmed}/chat/completions` };
+}
+
+function extractAnthropicAssistantText(data) {
+  const blocks = data?.content;
+  if (!Array.isArray(blocks)) return "";
+  return blocks.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("");
 }
 
 function ensureBailianConfigReady() {
-  const chatUrl = resolveChatCompletionsUrl(modelConfig.baseUrl);
+  const { mode, url: invokeUrl } = resolveBailianInvoke(modelConfig.baseUrl);
   const apiKey = modelConfig.apiKey.trim();
   const modelName = modelConfig.modelName.trim();
-  if (!chatUrl || !apiKey || !modelName) {
-    throw new Error("请先在平台配置中完整填写 Base URL / API密钥 / 模型名称");
+  if (!invokeUrl || !apiKey || !modelName) {
+    throw new Error("请先在系统设置中完整填写 Base URL / API 密钥 / 模型名称");
   }
-  return { chatUrl, apiKey, modelName };
+  return { invokeUrl, mode, apiKey, modelName };
 }
 
 async function callBailianChat(userPrompt) {
-  const { chatUrl, apiKey, modelName } = ensureBailianConfigReady();
-  const res = await fetch(chatUrl, {
+  const { invokeUrl, mode, apiKey, modelName } = ensureBailianConfigReady();
+  /** 百炼文档：x-api-key 与 Authorization: Bearer 二选一；Coding Plan 的 sk-* 密钥在浏览器侧与 Bearer 更一致 */
+  const headers =
+    mode === "anthropic"
+      ? {
+          "Content-Type": "application/json",
+          ...(apiKey.startsWith("sk-")
+            ? { Authorization: `Bearer ${apiKey}` }
+            : { "x-api-key": apiKey })
+        }
+      : {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`
+        };
+  const body =
+    mode === "anthropic"
+      ? JSON.stringify({
+          model: modelName,
+          max_tokens: 1024,
+          stream: false,
+          messages: [{ role: "user", content: userPrompt }],
+          thinking: { type: "disabled" }
+        })
+      : JSON.stringify({
+          model: modelName,
+          stream: false,
+          messages: [{ role: "user", content: userPrompt }]
+        });
+  const res = await fetch(invokeUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: modelName,
-      stream: false,
-      messages: [{ role: "user", content: userPrompt }]
-    })
+    headers,
+    credentials: "omit",
+    body
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data?.message || data?.error?.message || `HTTP ${res.status}`);
+  const rawText = await res.text();
+  let data = {};
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      throw new Error(`响应非 JSON（HTTP ${res.status}）：${rawText.slice(0, 240)}`);
+    }
   }
-  return data?.choices?.[0]?.message?.content || "";
+  if (!res.ok) {
+    const msg =
+      data?.error?.message ||
+      data?.message ||
+      (typeof data?.error === "string" ? data.error : null) ||
+      `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  if (mode === "anthropic") {
+    const text = extractAnthropicAssistantText(data);
+    if (!text) {
+      throw new Error("响应成功但未解析到 assistant 文本（请核对 Base URL 是否为 …/apps/anthropic 及模型名）");
+    }
+    return text;
+  }
+  const openaiText = data?.choices?.[0]?.message?.content || "";
+  if (!openaiText) {
+    throw new Error("响应成功但未解析到 choices[0].message.content（OpenAI 兼容网关请使用 …/compatible-mode/v1）");
+  }
+  return openaiText;
+}
+
+/**
+ * 为 true 时，「测试调用」仅走 Mock，不调后端。
+ * 默认关闭；需本地纯前端演练时设置 VITE_MOCK_BAILIAN_TEST=true。
+ */
+function isMockBailianTestEnabled() {
+  const v = import.meta.env.VITE_MOCK_BAILIAN_TEST;
+  return v === "true" || v === "1";
+}
+
+async function loadDbInspectorTables() {
+  if (currentUser.value?.phone !== DB_INSPECTOR_ALLOWED_PHONE) return;
+  dbInspectorLoading.value = true;
+  try {
+    const data = await listDbInspectorTables();
+    dbInspectorTables.value = Array.isArray(data?.tableNames) ? data.tableNames : [];
+    if (!dbInspectorSelectedTable.value && dbInspectorTables.value.length) {
+      dbInspectorSelectedTable.value = dbInspectorTables.value[0];
+      dbInspectorOffset.value = 0;
+      await fetchDbInspectorRows();
+    } else if (dbInspectorSelectedTable.value && !dbInspectorTables.value.includes(dbInspectorSelectedTable.value)) {
+      dbInspectorSelectedTable.value = dbInspectorTables.value[0] || "";
+      dbInspectorOffset.value = 0;
+      if (dbInspectorSelectedTable.value) await fetchDbInspectorRows();
+      else {
+        dbInspectorColumns.value = [];
+        dbInspectorRows.value = [];
+        dbInspectorRowCount.value = 0;
+      }
+    } else if (dbInspectorSelectedTable.value) {
+      await fetchDbInspectorRows();
+    }
+  } catch (e) {
+    showToast(e?.message || "加载表列表失败", "error");
+    dbInspectorTables.value = [];
+  } finally {
+    dbInspectorLoading.value = false;
+  }
+}
+
+async function fetchDbInspectorRows() {
+  const t = dbInspectorSelectedTable.value;
+  if (!t || currentUser.value?.phone !== DB_INSPECTOR_ALLOWED_PHONE) return;
+  dbInspectorLoading.value = true;
+  try {
+    const data = await listDbInspectorTableRows(t, dbInspectorOffset.value, dbInspectorLimit.value);
+    dbInspectorColumns.value = Array.isArray(data?.columnNames) ? data.columnNames : [];
+    dbInspectorRows.value = Array.isArray(data?.rows) ? data.rows : [];
+    dbInspectorRowCount.value = typeof data?.rowCount === "number" ? data.rowCount : Number(data?.rowCount) || 0;
+  } catch (e) {
+    showToast(e?.message || "加载表数据失败", "error");
+    dbInspectorColumns.value = [];
+    dbInspectorRows.value = [];
+    dbInspectorRowCount.value = 0;
+  } finally {
+    dbInspectorLoading.value = false;
+  }
+}
+
+async function selectDbInspectorTable(tableName) {
+  if (!tableName) return;
+  dbInspectorSelectedTable.value = tableName;
+  dbInspectorOffset.value = 0;
+  await fetchDbInspectorRows();
+}
+
+function dbInspectorPrevPage() {
+  const next = dbInspectorOffset.value - dbInspectorLimit.value;
+  dbInspectorOffset.value = Math.max(0, next);
+  fetchDbInspectorRows();
+}
+
+function dbInspectorNextPage() {
+  const next = dbInspectorOffset.value + dbInspectorLimit.value;
+  if (next >= dbInspectorRowCount.value) return;
+  dbInspectorOffset.value = next;
+  fetchDbInspectorRows();
+}
+
+function formatDbInspectorCell(val) {
+  if (val == null || val === "") return "—";
+  if (typeof val === "object") {
+    try {
+      return JSON.stringify(val);
+    } catch {
+      return String(val);
+    }
+  }
+  return String(val);
 }
 
 async function testBailianConfigConnection() {
   if (testingModelConfig.value) return;
+  if (!currentUser.value) return;
   testingModelConfig.value = true;
   modelConfigTestResult.value = "";
   try {
-    const answer = await callBailianChat(modelConfig.testPrompt || "连接测试");
-    modelConfigTestResult.value = `调用成功：${answer}`;
+    if (isMockBailianTestEnabled()) {
+      await new Promise((r) => setTimeout(r, 350));
+      const prompt = modelConfig.testPrompt || "连接测试";
+      const tail = prompt.length > 120 ? `${prompt.slice(0, 120)}…` : prompt;
+      modelConfigTestResult.value =
+        `调用成功（Mock，未请求后端）：连接测试成功\n（模拟模型：${modelConfig.modelName || "（未填）"}；提示词：${tail}）`;
+      return;
+    }
+    const data = await testModelConfig({
+      testPrompt: modelConfig.testPrompt || "连接测试",
+      modelName: (modelConfig.modelName || "").trim()
+    });
+    const answer = data?.assistantText ?? "";
+    modelConfigTestResult.value = answer ? `调用成功：${answer}` : "调用成功（无正文）";
   } catch (e) {
     modelConfigTestResult.value = `调用失败：${e?.message || "未知错误"}`;
   } finally {
@@ -1304,35 +1925,377 @@ async function testBailianConfigConnection() {
   }
 }
 
+async function loadAggregatedResumes() {
+  if (!currentUser.value) {
+    resumes.value = [];
+    return;
+  }
+  try {
+    const raw = await listAllResumeDocuments();
+    resumes.value = Array.isArray(raw) ? raw : [];
+  } catch {
+    resumes.value = [];
+  }
+  if (resumeUiPhase.value === "detail" && selectedResumeId.value) {
+    const exists = resumes.value.some((r) => String(r.resumeId) === String(selectedResumeId.value));
+    if (!exists) {
+      showToast("当前简历已不存在或已被删除", "warning");
+      resumeUiPhase.value = "list";
+      hydrateResumeFromRow(null);
+    } else {
+      try {
+        await refreshCurrentResumeDetailFromServer();
+      } catch {
+        resumeUiPhase.value = "list";
+        hydrateResumeFromRow(null);
+      }
+    }
+  }
+}
+
+async function loadAggregatedJobs() {
+  if (!currentUser.value) {
+    jobs.value = [];
+    syncJobFormFromFirstJob();
+    return;
+  }
+  try {
+    const raw = await listAllJobPositions();
+    jobs.value = Array.isArray(raw) ? raw : [];
+  } catch {
+    jobs.value = [];
+  }
+  syncJobFormFromFirstJob();
+}
+
+async function loadSpaceManagementOverview() {
+  if (!currentUser.value) {
+    spaceMgmtRows.value = [];
+    return;
+  }
+  spaceMgmtLoading.value = true;
+  try {
+    const active = Array.isArray(spaces.value) ? [...spaces.value] : [];
+    if (active.length === 0) {
+      spaceMgmtRows.value = [];
+      return;
+    }
+    const rows = await Promise.all(
+      active.map(async (s) => {
+        let docs = [];
+        let jobList = [];
+        try {
+          const raw = await listResumeDocuments(s.spaceId);
+          docs = Array.isArray(raw) ? raw : [];
+        } catch {
+          docs = [];
+        }
+        try {
+          const raw = await listJobPositions(s.spaceId);
+          jobList = Array.isArray(raw) ? raw : [];
+        } catch {
+          jobList = [];
+        }
+        return {
+          spaceId: s.spaceId,
+          name: s.name || s.spaceId,
+          createdAt: s.createdAt,
+          updatedAt: s.updatedAt,
+          resumes: docs,
+          jobs: jobList
+        };
+      })
+    );
+    spaceMgmtRows.value = rows;
+  } finally {
+    spaceMgmtLoading.value = false;
+  }
+}
+
+function selectSpaceAsCurrent(spaceId) {
+  if (!spaceId) return;
+  currentSpaceId.value = spaceId;
+  sidebarOpen.value = false;
+  showToast("已切换为当前工作空间", "success");
+}
+
+async function openSpaceMgmtResumeDetail(spaceId, doc) {
+  if (!spaceId || !doc?.resumeId) return;
+  if (jobDetailModalOpen.value) closeJobDetailModal();
+  if (showSpaceMgmtBindModal.value) closeSpaceMgmtBindModal();
+  resetPanelModalDrag();
+  spaceMgmtResumeDetailOpen.value = true;
+  spaceMgmtResumeDetailLoading.value = true;
+  spaceMgmtResumeDetailDoc.value = null;
+  spaceMgmtResumeDetailSpaceLabel.value = spaceDisplayName(spaceId);
+  try {
+    spaceMgmtResumeDetailDoc.value = await getResumeDocument(spaceId, doc.resumeId);
+  } catch (e) {
+    showToast(e?.message || "加载简历失败", "error");
+    spaceMgmtResumeDetailOpen.value = false;
+  } finally {
+    spaceMgmtResumeDetailLoading.value = false;
+  }
+}
+
+function closeSpaceMgmtResumeDetail() {
+  resetPanelModalDrag();
+  spaceMgmtResumeDetailOpen.value = false;
+  spaceMgmtResumeDetailDoc.value = null;
+  spaceMgmtResumeDetailSpaceLabel.value = "";
+}
+
+function spaceMgmtJobsForDisplay(jobList) {
+  const list = Array.isArray(jobList) ? [...jobList] : [];
+  list.sort((a, b) => {
+    const ac = (a.status || "ACTIVE") === "ACTIVE" ? 0 : 1;
+    const bc = (b.status || "ACTIVE") === "ACTIVE" ? 0 : 1;
+    if (ac !== bc) return ac - bc;
+    return (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0);
+  });
+  return list;
+}
+
+function spaceMgmtCanOpenResumeBind() {
+  return (Array.isArray(resumes.value) ? resumes.value : []).length > 0;
+}
+
+function spaceMgmtCanOpenJobBind() {
+  return (Array.isArray(jobs.value) ? jobs.value : []).length > 0;
+}
+
+/** 与「简历管理」列表同源：全部简历，按更新时间倒序（不按空间分组） */
+function buildBindResumePickGroups(targetSpaceId) {
+  void targetSpaceId;
+  const list = [...(Array.isArray(resumes.value) ? resumes.value : [])];
+  if (list.length === 0) return [];
+  list.sort((a, b) => {
+    const ta = Date.parse(a.updatedAt || a.createdAt || 0) || 0;
+    const tb = Date.parse(b.updatedAt || b.createdAt || 0) || 0;
+    return tb - ta;
+  });
+  return [{ spaceId: "_all", name: "", items: list }];
+}
+
+/** 与「岗位管理」列表同源：全部活跃岗位，按更新时间倒序 */
+function buildBindJobPickGroups(targetSpaceId) {
+  void targetSpaceId;
+  const list = (Array.isArray(jobs.value) ? jobs.value : []).filter((j) => (j.status || "ACTIVE") === "ACTIVE");
+  if (list.length === 0) return [];
+  const sorted = [...list].sort((a, b) => {
+    const ta = Date.parse(a.updatedAt || a.createdAt || 0) || 0;
+    const tb = Date.parse(b.updatedAt || b.createdAt || 0) || 0;
+    return tb - ta;
+  });
+  return [{ spaceId: "_all", name: "", items: sorted }];
+}
+
+function resumeDuplicateInTargetSpace(item, targetSpaceId) {
+  if (!item || !targetSpaceId) return false;
+  const t = resumeRowPrimaryTitle(item).trim();
+  if (!t) return false;
+  const inTarget = (resumes.value || []).filter((r) => rowSpaceIds(r).includes(String(targetSpaceId)));
+  return inTarget.some((r) => String(r.resumeId) !== String(item.resumeId) && resumeRowPrimaryTitle(r).trim() === t);
+}
+
+function jobDuplicateInTargetSpace(item, targetSpaceId) {
+  if (!item || !targetSpaceId) return false;
+  const lab = jobBindLabel(item).trim();
+  if (!lab) return false;
+  const inTarget = (jobs.value || []).filter((j) => rowSpaceIds(j).includes(String(targetSpaceId)));
+  return inTarget.some((j) => String(j.positionId) !== String(item.positionId) && jobBindLabel(j).trim() === lab);
+}
+
+function spaceMgmtResumeBindStatus(item, targetSpaceId) {
+  if (!item || !targetSpaceId) return { code: "bindable", label: "未绑定" };
+  if (rowSpaceIds(item).includes(String(targetSpaceId))) {
+    return { code: "in_space", label: "已绑定本空间" };
+  }
+  if (resumeDuplicateInTargetSpace(item, targetSpaceId)) {
+    return { code: "dup", label: "目标空间已有同名" };
+  }
+  return { code: "bindable", label: "未绑定" };
+}
+
+function spaceMgmtJobBindStatus(item, targetSpaceId) {
+  if (!item || !targetSpaceId) return { code: "bindable", label: "未绑定" };
+  if (rowSpaceIds(item).includes(String(targetSpaceId))) {
+    return { code: "in_space", label: "已绑定本空间" };
+  }
+  if (jobDuplicateInTargetSpace(item, targetSpaceId)) {
+    return { code: "dup", label: "目标空间已有同标签" };
+  }
+  return { code: "bindable", label: "未绑定" };
+}
+
+function spaceMgmtResumeBoundToTarget(item) {
+  const tid = spaceMgmtBindTargetSpaceId.value;
+  return !!(item && tid && rowSpaceIds(item).includes(String(tid)));
+}
+
+function spaceMgmtJobBoundToTarget(item) {
+  const tid = spaceMgmtBindTargetSpaceId.value;
+  return !!(item && tid && rowSpaceIds(item).includes(String(tid)));
+}
+
+function spaceMgmtResumeDupWarn(item) {
+  const tid = spaceMgmtBindTargetSpaceId.value;
+  if (!item || !tid || spaceMgmtResumeBoundToTarget(item)) return false;
+  return spaceMgmtResumeBindStatus(item, tid).code === "dup";
+}
+
+function spaceMgmtJobDupWarn(item) {
+  const tid = spaceMgmtBindTargetSpaceId.value;
+  if (!item || !tid || spaceMgmtJobBoundToTarget(item)) return false;
+  return spaceMgmtJobBindStatus(item, tid).code === "dup";
+}
+
+function closeSpaceMgmtBindModal() {
+  resetPanelModalDrag();
+  showSpaceMgmtBindModal.value = false;
+  spaceMgmtBindKind.value = "";
+  spaceMgmtBindTargetSpaceId.value = "";
+  spaceMgmtBindPickGroups.value = [];
+  spaceMgmtBindPickLoading.value = false;
+  spaceMgmtBindActionLoading.value = false;
+}
+
+async function openSpaceMgmtBindResumeModal(targetSpaceId) {
+  if (!targetSpaceId) return;
+  closeSpaceMgmtResumeDetail();
+  if (activeTab.value === "resume" && resumeUiPhase.value === "detail") {
+    if (!(await confirmResumeDetailLeave())) return;
+  }
+  spaceMgmtBindKind.value = "resume";
+  spaceMgmtBindTargetSpaceId.value = targetSpaceId;
+  spaceMgmtBindPickLoading.value = true;
+  spaceMgmtBindPickGroups.value = [];
+  resetPanelModalDrag();
+  showSpaceMgmtBindModal.value = true;
+  try {
+    await loadAggregatedResumes();
+    spaceMgmtBindPickGroups.value = buildBindResumePickGroups(targetSpaceId);
+    if (!spaceMgmtBindPickGroups.value.length) {
+      showToast("暂无简历，请先在「简历管理」中创建。", "warning");
+    }
+  } finally {
+    spaceMgmtBindPickLoading.value = false;
+  }
+}
+
+async function openSpaceMgmtBindJobModal(targetSpaceId) {
+  if (!targetSpaceId) return;
+  closeSpaceMgmtResumeDetail();
+  if (activeTab.value === "resume" && resumeUiPhase.value === "detail") {
+    if (!(await confirmResumeDetailLeave())) return;
+  }
+  spaceMgmtBindKind.value = "job";
+  spaceMgmtBindTargetSpaceId.value = targetSpaceId;
+  spaceMgmtBindPickLoading.value = true;
+  spaceMgmtBindPickGroups.value = [];
+  resetPanelModalDrag();
+  showSpaceMgmtBindModal.value = true;
+  try {
+    await loadAggregatedJobs();
+    spaceMgmtBindPickGroups.value = buildBindJobPickGroups(targetSpaceId);
+    if (!spaceMgmtBindPickGroups.value.length) {
+      showToast("暂无岗位，请先在「岗位管理」中添加。", "warning");
+    }
+  } finally {
+    spaceMgmtBindPickLoading.value = false;
+  }
+}
+
+async function toggleSpaceMgmtBindResume(item) {
+  const target = spaceMgmtBindTargetSpaceId.value;
+  const resumeId = item?.resumeId;
+  if (!resumeId || !target) return;
+  if (spaceMgmtBindActionLoading.value) return;
+  const bound = rowSpaceIds(item).includes(String(target));
+  spaceMgmtBindActionLoading.value = true;
+  try {
+    if (bound) {
+      const ids = rowSpaceIds(item);
+      if (ids.length === 1 && ids[0] === String(target)) {
+        if (
+          !confirm(
+            "该简历仅关联到本空间。从本空间移除后，系统将删除该简历数据（所有空间不可恢复）。确定要解绑吗？"
+          )
+        ) {
+          return;
+        }
+      }
+      await deleteResumeDocument(target, resumeId);
+      showToast("已从本空间解绑", "success");
+    } else {
+      await linkResumeToSpace(target, resumeId);
+      showToast("已绑定到本空间", "success");
+    }
+    await loadAggregatedResumes();
+    spaceMgmtBindPickGroups.value = buildBindResumePickGroups(target);
+    await loadSpaceManagementOverview();
+  } catch (e) {
+    showToast(e?.message || "操作失败", "error");
+  } finally {
+    spaceMgmtBindActionLoading.value = false;
+  }
+}
+
+async function toggleSpaceMgmtBindJob(item) {
+  const target = spaceMgmtBindTargetSpaceId.value;
+  if (!target || !item?.positionId) return;
+  if (spaceMgmtBindActionLoading.value) return;
+  const bound = rowSpaceIds(item).includes(String(target));
+  spaceMgmtBindActionLoading.value = true;
+  try {
+    if (bound) {
+      await unlinkJobFromSpace(target, item.positionId);
+      showToast("已从本空间解绑", "success");
+    } else {
+      await linkJobToSpace(target, item.positionId);
+      showToast("已绑定到本空间", "success");
+    }
+    await loadAggregatedJobs();
+    spaceMgmtBindPickGroups.value = buildBindJobPickGroups(target);
+    await loadSpaceManagementOverview();
+  } catch (e) {
+    showToast(e?.message || "操作失败", "error");
+  } finally {
+    spaceMgmtBindActionLoading.value = false;
+  }
+}
+
 async function loadSpaceData() {
+  if (activeTab.value === "db-inspector") {
+    await loadDbInspectorTables();
+    return;
+  }
   if (activeTab.value === "recycle") {
     recycleBinSpaces.value = await listRecycleBinSpaces();
     return;
   }
+  if (activeTab.value === "resume") {
+    await loadAggregatedResumes();
+    return;
+  }
+  if (activeTab.value === "job") {
+    await loadAggregatedJobs();
+    return;
+  }
+  if (activeTab.value === "space-mgmt") {
+    await Promise.all([loadSpaceManagementOverview(), loadAggregatedResumes(), loadAggregatedJobs()]);
+    return;
+  }
+  if (activeTab.value === "config") {
+    await loadBailianConfig();
+    return;
+  }
+
   if (!currentSpaceId.value) return;
+
   if (activeTab.value === "dashboard") {
     interviews.value = await listInterview(currentSpaceId.value);
     return;
-  }
-  if (activeTab.value === "resume") {
-    resumes.value = await listResumes(currentSpaceId.value);
-    resumeBlocks.splice(0, resumeBlocks.length);
-    if (resumes.value[0]?.content) {
-      const chunks = resumes.value[0].content.split("\n\n");
-      chunks.forEach((chunk, idx) => {
-        const lines = chunk.split("\n");
-        const titleLine = (lines[0] || "").trim();
-        const title = titleLine.startsWith("【") && titleLine.endsWith("】")
-          ? titleLine.slice(1, -1)
-          : `卡片${idx + 1}`;
-        const text = lines.slice(1).join("\n");
-        resumeBlocks.push({ title, text });
-      });
-    }
-  }
-  if (activeTab.value === "job") {
-    jobs.value = await listJobPositions(currentSpaceId.value);
-    syncJobFormFromFirstJob();
   }
   if (activeTab.value === "answer") {
     const bank = await getAnswerBank(currentSpaceId.value);
@@ -1361,8 +2324,7 @@ async function loadSpaceData() {
   }
   if (activeTab.value === "mock" || activeTab.value === "interview") {
     interviews.value = await listInterview(currentSpaceId.value);
-    jobs.value = await listJobPositions(currentSpaceId.value);
-    syncJobFormFromFirstJob();
+    await loadAggregatedJobs();
     if (activeTab.value === "interview") {
       hydrateInterviewFromLatestReal();
       mergeJobFormIntoProfile(realJobProfile);
@@ -1372,38 +2334,44 @@ async function loadSpaceData() {
       mergeJobFormIntoProfile(mockJobProfile);
     }
   }
-  if (activeTab.value === "config") {
-    await loadBailianConfig();
-  }
-}
-
-async function saveSpaceConfig() {
-  if (!currentSpaceId.value) return;
-  syncJobFormFromFirstJob();
-  if (activeTab.value === "interview") {
-    Object.assign(jobForm, {
-      title: realJobProfile.title,
-      company: realJobProfile.company,
-      location: realJobProfile.location
-    });
-  }
-  if (activeTab.value === "mock") {
-    Object.assign(jobForm, {
-      title: mockJobProfile.title,
-      company: mockJobProfile.company,
-      location: mockJobProfile.location
-    });
-  }
-  await saveResume();
-  await upsertPrimaryJobFromForm();
-  await saveAnswer();
 }
 
 async function saveResume() {
-  if (!currentSpaceId.value) return;
-  const content = resumeBlocks.map((b) => `【${b.title}】\n${b.text}`).join("\n\n");
-  await createResume({ spaceId: currentSpaceId.value, version: String(resumeVersion.value), content });
-  resumes.value = await listResumes(currentSpaceId.value);
+  const row = selectedResumeRow.value;
+  if (!row?.resumeId) return;
+  const spaceId = pickLinkedSpaceIdForApi(row);
+  resumeSaveLoading.value = true;
+  try {
+    const body = JSON.parse(serializeResumeDraft());
+    if (spaceId) {
+      await updateResumeDocument(spaceId, row.resumeId, body);
+    } else {
+      await updateResumeDocumentById(row.resumeId, body);
+    }
+    await loadAggregatedResumes();
+    const refreshed = (Array.isArray(resumes.value) ? resumes.value : []).find(
+      (r) => String(r.resumeId) === String(selectedResumeId.value)
+    );
+    if (refreshed) {
+      hydrateResumeFromRow(refreshed);
+    } else {
+      resumeDraftBaseline.value = serializeResumeDraft();
+    }
+    if (showAddSpaceModal.value) {
+      await loadBindSourceResources();
+    }
+  } finally {
+    resumeSaveLoading.value = false;
+  }
+}
+
+async function saveCurrentResumeManual() {
+  try {
+    await saveResume();
+    showToast("简历已保存", "success");
+  } catch (e) {
+    showToast(e?.message || "保存失败", "error");
+  }
 }
 
 function onResumeDragStart(index) {
@@ -1420,8 +2388,12 @@ function onResumeDrop(targetIndex) {
 }
 
 function addResumeBlock() {
+  if (!selectedResumeId.value) {
+    showToast("请先新增或选择一份简历", "warning");
+    return;
+  }
   const title = newResumeBlockTitle.value.trim() || `自定义模块${resumeBlocks.length + 1}`;
-  resumeBlocks.push({ title, text: "" });
+  resumeBlocks.push({ id: newResumeBlockId(), title, text: "" });
   newResumeBlockTitle.value = "";
 }
 
@@ -1477,11 +2449,12 @@ function clearUndoState() {
 }
 
 async function upsertPrimaryJobFromForm() {
-  if (!currentSpaceId.value) return;
   const title = (jobForm.title || "").trim();
   if (!title) return;
   const activeList = jobs.value.filter((j) => (j.status || "ACTIVE") === "ACTIVE");
-  const first = activeList[0];
+  const cur = String(currentSpaceId.value || "");
+  const scoped = cur ? activeList.filter((j) => rowSpaceIds(j).includes(cur)) : activeList;
+  const first = scoped[0] || activeList[0];
   const body = {
     title,
     company: (jobForm.company || "").trim(),
@@ -1491,9 +2464,11 @@ async function upsertPrimaryJobFromForm() {
   if (first?.positionId) {
     await updateJobPosition(first.positionId, body);
   } else {
-    await createJobPosition({ spaceId: currentSpaceId.value, ...body });
+    const payload = { ...body };
+    if (cur) payload.spaceId = cur;
+    await createJobPosition(payload);
   }
-  jobs.value = await listJobPositions(currentSpaceId.value);
+  await loadAggregatedJobs();
   syncJobFormFromFirstJob();
 }
 
@@ -1622,6 +2597,10 @@ function onGlobalEscape(e) {
     closeJobDetailModal();
     return;
   }
+  if (spaceMgmtResumeDetailOpen.value) {
+    closeSpaceMgmtResumeDetail();
+    return;
+  }
   if (jobModalOpen.value) {
     requestCloseJobModal();
     return;
@@ -1642,6 +2621,10 @@ function onGlobalEscape(e) {
     closeRenameSpaceModal();
     return;
   }
+  if (showSpaceMgmtBindModal.value) {
+    closeSpaceMgmtBindModal();
+    return;
+  }
   if (showAuthModal.value) {
     dismissAuthModal();
   }
@@ -1649,6 +2632,7 @@ function onGlobalEscape(e) {
 
 onMounted(async () => {
   document.addEventListener("keydown", onGlobalEscape);
+  window.addEventListener("beforeunload", onResumeBeforeUnload);
   loadUserSession();
   if (currentUser.value) {
     await refreshSpaces();
@@ -1658,6 +2642,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", onGlobalEscape);
+  window.removeEventListener("beforeunload", onResumeBeforeUnload);
   removePanelModalDragListeners();
   clearUndoTimer();
 });
@@ -1744,12 +2729,6 @@ onBeforeUnmount(() => {
               <button type="button" :class="sidebarNavButtonClass(item.key)" @click="switchTab(item.key)">
                 <i :class="item.iconClass" class="w-7 text-center shrink-0 opacity-90"></i>
                 <span class="min-w-0 flex-1 truncate">{{ item.label }}</span>
-                <span
-                  v-if="item.key === 'job' && activeTab === 'job'"
-                  class="shrink-0 rounded-full bg-primary px-2 py-0.5 text-[10px] font-medium text-white leading-none"
-                >
-                  当前
-                </span>
               </button>
             </li>
           </ul>
@@ -1765,34 +2744,6 @@ onBeforeUnmount(() => {
                 <i :class="item.iconClass" class="w-7 text-center shrink-0 opacity-90"></i>
                 <span class="min-w-0 flex-1 truncate">{{ item.label }}</span>
               </button>
-            </li>
-            <li class="mb-0.5 px-2">
-              <button type="button" :class="platformParentButtonClass" @click="togglePlatformNav">
-                <i
-                  class="fa-solid fa-gear w-7 text-center shrink-0 opacity-90"
-                  :class="activeTab === 'config' ? 'text-primary' : ''"
-                ></i>
-                <span class="min-w-0 flex-1 truncate">平台配置</span>
-                <i :class="platformChevronClass"></i>
-              </button>
-              <ul v-show="platformNavOpen" class="list-none m-0 mt-0.5 border-l-2 border-gray-200 pl-2 ml-5 mr-2 space-y-0.5">
-                <li>
-                  <button type="button" :class="sidebarNavButtonClass('config', { sub: true })" @click="switchTab('config')">
-                    <i class="fa-solid fa-sliders w-7 text-center shrink-0 opacity-90"></i>
-                    <span class="min-w-0 flex-1 truncate text-left">系统设置</span>
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    class="flex w-full items-center gap-0 pl-2 pr-3 py-2.5 text-left text-sm rounded-md transition-colors border-l-4 border-transparent text-gray-600 hover:bg-gray-100 hover:text-red-600"
-                    @click="logoutUser"
-                  >
-                    <i class="fa-solid fa-right-from-bracket w-7 text-center shrink-0 opacity-90"></i>
-                    <span class="min-w-0 flex-1 truncate text-left">退出登录</span>
-                  </button>
-                </li>
-              </ul>
             </li>
           </ul>
         </nav>
@@ -1822,32 +2773,8 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div class="flex flex-wrap items-center gap-2 sm:gap-3">
-            <button
-              type="button"
-              class="text-gray-600 hover:text-primary text-sm flex items-center gap-1 disabled:opacity-40"
-              :disabled="!currentSpaceId"
-              @click="saveSpaceConfig"
-            >
-              <i class="fa-solid fa-floppy-disk"></i><span class="hidden sm:inline">保存配置</span>
-            </button>
-            <button
-              type="button"
-              class="text-gray-600 hover:text-red-600 text-sm flex items-center gap-1 disabled:opacity-40"
-              :disabled="!currentSpaceId"
-              @click="moveCurrentSpaceToRecycleBin"
-            >
-              <i class="fa-solid fa-trash"></i><span class="hidden sm:inline">删除空间</span>
-            </button>
             <button type="button" class="text-gray-600 hover:text-primary text-sm flex items-center gap-1" @click="openConfigPage">
               <i class="fa-solid fa-wand-magic-sparkles"></i><span class="hidden sm:inline">AI</span>
-            </button>
-            <button
-              type="button"
-              class="w-9 h-9 rounded-full border border-gray-200 text-gray-600 hover:border-primary hover:text-primary text-sm font-medium"
-              title="平台配置"
-              @click="openConfigPage"
-            >
-              U
             </button>
             <div v-if="currentUser" class="flex items-center gap-2 pl-1 border-l border-gray-200 ml-1">
               <div
@@ -1865,7 +2792,18 @@ onBeforeUnmount(() => {
       </header>
 
       <main class="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
-        <section v-if="activeTab !== 'recycle' && !currentSpaceId" class="bg-white rounded-lg shadow-card p-8 text-center fade-in">
+        <section
+          v-if="
+            activeTab !== 'recycle' &&
+            activeTab !== 'resume' &&
+            activeTab !== 'job' &&
+            activeTab !== 'space-mgmt' &&
+            activeTab !== 'db-inspector' &&
+            activeTab !== 'user' &&
+            !currentSpaceId
+          "
+          class="bg-white rounded-lg shadow-card p-8 text-center fade-in"
+        >
           <i class="fa-solid fa-location-dot text-4xl text-gray-300 mb-3"></i>
           <h2 class="text-lg font-semibold text-gray-800 mb-2">请选择工作空间</h2>
           <p class="text-gray-500 text-sm">在左侧选择或新建空间后再编辑业务数据。</p>
@@ -1915,91 +2853,202 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section v-if="activeTab === 'resume' && currentSpaceId" class="fade-in space-y-6">
-          <div class="bg-white rounded-lg shadow-card p-6">
-            <h2 class="text-lg font-semibold text-gray-800 mb-1 flex items-center gap-2">
-              <i class="fa-solid fa-file-lines text-primary"></i>简历管理
-            </h2>
-            <p class="text-sm text-gray-500 mb-4">支持拖拽调整模块顺序，自由编辑各模块内容。</p>
-            <div class="flex flex-wrap gap-2 items-center mb-3">
-              <input
-                v-model="newResumeBlockTitle"
-                type="text"
-                placeholder="新模块标题（可选）"
-                class="flex-1 min-w-[10rem] max-w-xs px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-              />
+        <section v-if="activeTab === 'resume' && currentUser" class="fade-in space-y-6">
+          <div v-if="resumeUiPhase === 'list'" class="bg-white rounded-lg shadow-card p-6">
+            <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
+              <div>
+                <h2 class="text-lg font-semibold text-gray-800 mb-1 flex items-center gap-2">
+                  <i class="fa-solid fa-file-lines text-primary"></i>简历管理
+                </h2>
+                <p class="text-sm text-gray-500">
+                  每份简历<strong>仅存一条数据</strong>，可<strong>关联多个工作空间</strong>；列表按简历去重展示。无空间时也可新增；若左侧已选<strong>当前工作空间</strong>，新建将自动关联到该空间。删除将从<strong>所有已关联空间</strong>移除该简历。
+                </p>
+              </div>
               <button
                 type="button"
-                class="inline-flex items-center gap-2 px-4 py-2 bg-primary hover:bg-blue-700 text-white text-sm rounded-md transition-colors"
-                @click="addResumeBlock"
+                class="inline-flex items-center justify-center gap-2 shrink-0 px-4 py-2.5 bg-primary hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm transition-colors disabled:opacity-50"
+                :disabled="creatingResume"
+                @click="createNewResumeDoc"
               >
-                <i class="fa-solid fa-plus"></i>增加卡片
-              </button>
-              <button
-                type="button"
-                class="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                :disabled="!deletedBlockBackup"
-                @click="undoRemoveResumeBlock"
-              >
-                <i class="fa-solid fa-rotate-left"></i>撤销删除<span v-if="undoRemainSeconds > 0">（{{ undoRemainSeconds }}s）</span>
+                <i class="fa-solid fa-plus"></i>
+                新增简历
               </button>
             </div>
-            <p v-if="undoRemainSeconds > 0" class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 mb-4">
-              最近删除可在 {{ undoRemainSeconds }} 秒内撤销，超时后将无法恢复。
+
+            <p v-if="sortedResumeList.length === 0" class="text-sm text-gray-500 mb-4">
+              暂无简历，请点击「新增简历」创建第一份。若已选择<strong>当前工作空间</strong>，新建会自动关联到该空间；未选空间时简历可先存在，稍后在空间管理中绑定。
             </p>
-            <div
-              v-if="resumeBlocks.length === 0"
-              class="border-2 border-dashed border-gray-300 rounded-lg p-10 text-center"
-            >
-              <i class="fa-regular fa-file-lines text-4xl text-gray-300 mb-3"></i>
-              <h3 class="text-base font-medium text-gray-700 mb-1">暂无简历模块</h3>
-              <p class="text-sm text-gray-500 mb-4">点击下方按钮添加第一个模块</p>
-              <button
-                type="button"
-                class="inline-flex items-center gap-2 px-4 py-2 bg-primary hover:bg-blue-700 text-white text-sm rounded-md transition-colors"
-                @click="addResumeBlock"
-              >
-                <i class="fa-solid fa-plus"></i>添加简历模块
-              </button>
-            </div>
-            <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               <div
-                v-for="(b, idx) in resumeBlocks"
-                :key="b.title + idx"
-                class="bg-gray-50 rounded-lg border border-gray-200 p-4 hover:shadow-card transition-shadow cursor-grab active:cursor-grabbing"
-                draggable="true"
-                @dragstart="onResumeDragStart(idx)"
-                @dragover.prevent
-                @drop="onResumeDrop(idx)"
+                v-for="r in sortedResumeList"
+                :key="r.resumeId"
+                role="button"
+                tabindex="0"
+                class="relative text-left rounded-lg border p-4 transition-all hover:shadow-card bg-gray-50/50 border-gray-200 hover:border-primary/40 cursor-pointer outline-none focus:ring-2 focus:ring-primary/50"
+                @click="openResumeDetail(r)"
+                @keydown.enter.prevent="openResumeDetail(r)"
               >
-                <div class="flex items-center justify-between gap-2 mb-2">
-                  <input
-                    v-model="b.title"
-                    type="text"
-                    class="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-md text-sm font-medium focus:ring-2 focus:ring-primary"
-                    placeholder="模块名称"
-                    @blur="normalizeResumeBlockTitle(b, idx)"
-                  />
-                  <button
-                    type="button"
-                    class="text-gray-400 hover:text-red-600 p-2 shrink-0"
-                    title="删除"
-                    @click="removeResumeBlock(idx)"
-                  >
-                    <i class="fa-solid fa-trash"></i>
-                  </button>
+                <button
+                  type="button"
+                  class="absolute top-2 right-2 z-10 p-2 rounded-md text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                  title="从所有空间删除该简历"
+                  @click.stop="confirmDeleteResumeDoc(r, $event)"
+                >
+                  <i class="fa-solid fa-trash text-sm"></i>
+                </button>
+                <div class="flex items-start justify-between gap-2 mb-1 pr-9">
+                  <span class="font-medium text-gray-900 text-sm leading-snug">{{ resumeRowPrimaryTitle(r) }}</span>
                 </div>
-                <textarea
-                  v-model="b.text"
-                  rows="5"
-                  class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-y min-h-[6rem]"
-                />
+                <div v-if="rowSpaceIds(r).length" class="text-[11px] text-primary/90 font-medium mb-1">
+                  <span class="text-gray-600">已关联空间</span>
+                  <ul class="list-none m-0 mt-0.5 p-0 space-y-0.5">
+                    <li v-for="sid in rowSpaceIds(r)" :key="sid" class="truncate">{{ spaceDisplayName(sid) }}</li>
+                  </ul>
+                </div>
+                <p v-else class="text-[11px] text-gray-400 mb-1">未关联任何空间</p>
+                <p v-if="resumeUpdatedLabel(r)" class="text-[11px] text-gray-400 mb-1">更新 {{ resumeUpdatedLabel(r) }}</p>
+                <p class="text-xs text-gray-500 mb-1">{{ resumeModuleCount(r) }} 个模块</p>
+                <p class="text-xs text-gray-600 line-clamp-2 leading-relaxed">{{ resumeCardPreview(r) }}</p>
+                <p class="text-xs text-primary mt-2 font-medium">点击进入编辑 →</p>
               </div>
             </div>
           </div>
+
+          <div v-else class="bg-white rounded-lg shadow-card p-6">
+            <div class="flex flex-wrap items-center gap-3 mb-5 border-b border-gray-100 pb-4">
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                @click="backToResumeList"
+              >
+                <i class="fa-solid fa-arrow-left"></i>
+                返回列表
+              </button>
+              <h2 class="text-lg font-semibold text-gray-800 flex-1 min-w-0 flex items-center gap-2">
+                <i class="fa-solid fa-file-pen text-primary"></i>
+                <span class="truncate">简历详情</span>
+              </h2>
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50"
+                @click="deleteCurrentResumeFromDetail"
+              >
+                <i class="fa-solid fa-trash"></i>
+                删除此简历
+              </button>
+            </div>
+            <div v-if="rowSpaceIds(selectedResumeRow).length" class="text-xs text-gray-500 mb-4 -mt-2">
+              <span class="font-medium text-gray-600">已关联空间</span>
+              <ul class="list-none m-0 mt-1 p-0 space-y-0.5">
+                <li v-for="sid in rowSpaceIds(selectedResumeRow)" :key="sid" class="font-medium text-primary">
+                  {{ spaceDisplayName(sid) }}
+                </li>
+              </ul>
+            </div>
+            <div v-if="selectedResumeId">
+              <label class="block max-w-lg mb-4">
+                <span class="text-xs font-medium text-gray-600">简历名称</span>
+                <input
+                  v-model="resumeDisplayName"
+                  type="text"
+                  class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                  placeholder="例如：校招 Java 简历"
+                />
+                <span class="text-xs text-gray-500 mt-1 block leading-relaxed">
+                  名称与模块在点击「保存此简历」时写入数据库；若名称为空，保存时将使用「未命名简历」。
+                </span>
+              </label>
+              <p class="text-sm font-medium text-gray-800 mb-2">模块</p>
+              <div class="flex flex-wrap gap-2 items-center mb-3">
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  :disabled="resumeSaveLoading"
+                  @click="saveCurrentResumeManual"
+                >
+                  <i class="fa-solid fa-floppy-disk"></i>
+                  保存此简历
+                </button>
+                <input
+                  v-model="newResumeBlockTitle"
+                  type="text"
+                  placeholder="新模块标题（可选）"
+                  class="flex-1 min-w-[10rem] max-w-xs px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                />
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-2 px-4 py-2 bg-primary hover:bg-blue-700 text-white text-sm rounded-md transition-colors"
+                  @click="addResumeBlock"
+                >
+                  <i class="fa-solid fa-plus"></i>增加模块
+                </button>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  :disabled="!deletedBlockBackup"
+                  @click="undoRemoveResumeBlock"
+                >
+                  <i class="fa-solid fa-rotate-left"></i>撤销删除<span v-if="undoRemainSeconds > 0">（{{ undoRemainSeconds }}s）</span>
+                </button>
+              </div>
+              <p v-if="undoRemainSeconds > 0" class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 mb-4">
+                最近删除可在 {{ undoRemainSeconds }} 秒内撤销，超时后将无法恢复。
+              </p>
+              <div
+                v-if="resumeBlocks.length === 0"
+                class="border-2 border-dashed border-gray-300 rounded-lg p-10 text-center"
+              >
+                <i class="fa-regular fa-file-lines text-4xl text-gray-300 mb-3"></i>
+                <h3 class="text-base font-medium text-gray-700 mb-1">该简历下暂无模块</h3>
+                <p class="text-sm text-gray-500 mb-4">点击下方按钮添加第一个模块</p>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-2 px-4 py-2 bg-primary hover:bg-blue-700 text-white text-sm rounded-md transition-colors"
+                  @click="addResumeBlock"
+                >
+                  <i class="fa-solid fa-plus"></i>添加模块
+                </button>
+              </div>
+              <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div
+                  v-for="(b, idx) in resumeBlocks"
+                  :key="b.id"
+                  class="bg-gray-50 rounded-lg border border-gray-200 p-4 hover:shadow-card transition-shadow cursor-grab active:cursor-grabbing"
+                  draggable="true"
+                  @dragstart="onResumeDragStart(idx)"
+                  @dragover.prevent
+                  @drop="onResumeDrop(idx)"
+                >
+                  <div class="flex items-center justify-between gap-2 mb-2">
+                    <input
+                      v-model="b.title"
+                      type="text"
+                      class="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-md text-sm font-medium focus:ring-2 focus:ring-primary"
+                      placeholder="模块名称"
+                      @blur="normalizeResumeBlockTitle(b, idx)"
+                    />
+                    <button
+                      type="button"
+                      class="text-gray-400 hover:text-red-600 p-2 shrink-0"
+                      title="删除"
+                      @click="removeResumeBlock(idx)"
+                    >
+                      <i class="fa-solid fa-trash"></i>
+                    </button>
+                  </div>
+                  <textarea
+                    v-model="b.text"
+                    rows="5"
+                    class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-y min-h-[6rem]"
+                  />
+                </div>
+              </div>
+            </div>
+            <p v-else class="text-sm text-gray-500">正在加载简历…</p>
+          </div>
         </section>
 
-        <section v-if="activeTab === 'job' && currentSpaceId" class="fade-in space-y-6">
+        <section v-if="activeTab === 'job' && currentUser" class="fade-in space-y-6">
           <div class="bg-white rounded-lg shadow-md p-6">
             <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-6">
               <div>
@@ -2007,7 +3056,7 @@ onBeforeUnmount(() => {
                   <i class="fa-solid fa-briefcase text-primary"></i>岗位管理
                 </h2>
                 <p class="text-sm text-gray-500 mt-1">
-                  管理当前空间下的岗位：添加时仅需基础信息；岗位描述、JD 详细内容与考点请在「编辑」中补充。卡片右下角「查看详情」为只读，右上角为编辑与删除；顶栏「保存配置」会同步首条活跃岗位到简历/面试上下文。
+                  每个岗位<strong>仅存一条数据</strong>，可<strong>关联多个工作空间</strong>；列表按岗位去重展示。无空间时也可添加；若已选<strong>当前工作空间</strong>，新建会自动关联。删除将<strong>彻底移除</strong>该岗位（所有空间不可再见）。
                 </p>
               </div>
               <div class="flex flex-wrap gap-2 shrink-0">
@@ -2061,7 +3110,7 @@ onBeforeUnmount(() => {
                   <button
                     type="button"
                     class="p-2 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                    title="删除"
+                    title="从所有空间删除该岗位"
                     @click="requestDeleteJob(row)"
                   >
                     <i class="fa-solid fa-trash"></i>
@@ -2069,6 +3118,18 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="flex flex-wrap items-center gap-2 pr-16 mb-2">
                   <h3 class="text-lg font-semibold text-gray-900">{{ row.title || "未命名岗位" }}</h3>
+                  <div v-if="rowSpaceIds(row).length" class="flex flex-wrap gap-1">
+                    <span
+                      v-for="sid in rowSpaceIds(row)"
+                      :key="sid"
+                      class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 border border-gray-200 max-w-[10rem] truncate"
+                      :title="spaceDisplayName(sid)"
+                      >{{ spaceDisplayName(sid) }}</span>
+                  </div>
+                  <span
+                    v-else
+                    class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-900 border border-amber-200"
+                    >未关联空间</span>
                   <span
                     class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium"
                     :class="jobTypeBadgeClass(decodeJobBaseRange(row.baseRange).jobType)"
@@ -2101,6 +3162,155 @@ onBeforeUnmount(() => {
               <p>
                 支持「添加岗位」快速建档，「导入 JD」将引导你在编辑弹窗中粘贴；岗位描述、JD 富文本与考点关键词均保存在该岗位记录中。编辑弹窗可拖拽标题栏移动；点击遮罩关闭时若有未保存更改将询问是否保存。
               </p>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'space-mgmt' && currentUser" class="fade-in space-y-6">
+          <div class="bg-white rounded-lg shadow-card p-6">
+            <h2 class="text-lg font-semibold text-gray-800 mb-1 flex items-center gap-2">
+              <i class="fa-solid fa-layer-group text-primary"></i>空间管理
+            </h2>
+            <p class="text-sm text-gray-500 mb-6">
+              本页用于<strong>查看与维护空间与资源之间的绑定关系</strong>，以及<strong>删除空间</strong>（移入回收站）。列表为只读汇总；点击<strong>简历或岗位条目</strong>可弹出<strong>只读详情</strong>。「绑定简历 / 绑定岗位」弹窗列出与「简历管理」「岗位管理」一致的<strong>全量</strong>数据，可用<strong>开关</strong>绑定或解绑本空间（同一份数据，不复制）。<strong>编辑、删除简历或岗位</strong>请到「简历管理」「岗位管理」。
+            </p>
+            <div v-if="spaceMgmtLoading" class="text-center py-12 text-gray-500 text-sm">正在加载各空间资源…</div>
+            <div
+              v-else-if="!spaceMgmtRows.length"
+              class="text-center py-10 text-gray-500 text-sm border border-dashed border-gray-200 rounded-lg"
+            >
+              暂无活跃空间，请先在侧栏「新建」创建工作空间。
+            </div>
+            <div v-else class="space-y-4">
+              <article
+                v-for="sp in spaceMgmtRows"
+                :key="sp.spaceId"
+                class="rounded-xl border border-gray-200 bg-gray-50/50 p-5 shadow-sm"
+              >
+                <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+                  <div class="min-w-0">
+                    <h3 class="text-base font-semibold text-gray-900">{{ sp.name }}</h3>
+                    <p class="text-xs text-gray-500 font-mono mt-1 break-all">spaceId：{{ sp.spaceId }}</p>
+                    <p v-if="sp.createdAt || sp.updatedAt" class="text-[11px] text-gray-400 mt-1">
+                      创建于 {{ formatJobDate(sp.createdAt) }}
+                      <span v-if="sp.updatedAt"> · 更新 {{ formatJobDate(sp.updatedAt) }}</span>
+                    </p>
+                  </div>
+                  <div class="flex flex-wrap gap-2 shrink-0">
+                    <button
+                      v-if="sp.spaceId !== currentSpaceId"
+                      type="button"
+                      class="px-3 py-2 text-sm rounded-lg border border-primary text-primary hover:bg-blue-50 transition-colors"
+                      @click="selectSpaceAsCurrent(sp.spaceId)"
+                    >
+                      设为当前工作空间
+                    </button>
+                    <span
+                      v-else
+                      class="inline-flex items-center px-3 py-2 text-sm rounded-lg bg-blue-50 text-primary font-medium border border-primary/30"
+                      >当前工作空间</span>
+                    <button
+                      type="button"
+                      class="px-3 py-2 text-sm rounded-lg border border-gray-300 text-gray-700 hover:bg-white transition-colors"
+                      @click="openRenameForSpaceRow(sp)"
+                    >
+                      重命名
+                    </button>
+                    <button
+                      type="button"
+                      class="px-3 py-2 text-sm rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                      title="移入回收站，可在侧栏回收站还原"
+                      @click.stop="moveSpaceToRecycleBin(sp.spaceId)"
+                    >
+                      <i class="fa-solid fa-trash mr-1" aria-hidden="true"></i>删除空间
+                    </button>
+                  </div>
+                </div>
+                <div class="grid md:grid-cols-2 gap-4">
+                  <div class="rounded-lg bg-white border border-gray-100 p-4 min-h-[5rem]">
+                    <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                      <p class="text-xs font-semibold text-gray-600">简历（{{ sp.resumes?.length || 0 }}）</p>
+                      <div class="flex flex-wrap gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          class="text-xs px-2 py-1 rounded-md border border-primary text-primary hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                          :disabled="!spaceMgmtCanOpenResumeBind()"
+                          :title="
+                            !spaceMgmtCanOpenResumeBind()
+                              ? '请先在「简历管理」中创建至少一份简历'
+                              : '从「简历管理」列表选择一份简历，在本空间建立绑定（新增副本）'
+                          "
+                          @click="openSpaceMgmtBindResumeModal(sp.spaceId)"
+                        >
+                          绑定简历
+                        </button>
+                      </div>
+                    </div>
+                    <ul v-if="sp.resumes?.length" class="text-sm text-gray-800 space-y-1.5 list-none m-0 p-0">
+                      <li
+                        v-for="doc in sp.resumes"
+                        :key="doc.resumeId"
+                        role="button"
+                        tabindex="0"
+                        class="rounded-md border border-gray-100 bg-gray-50/40 px-2 py-1.5 text-gray-800 cursor-pointer hover:border-primary/50 hover:bg-blue-50/40 transition-colors outline-none focus:ring-2 focus:ring-primary/40"
+                        @click="openSpaceMgmtResumeDetail(sp.spaceId, doc)"
+                        @keydown.enter.prevent="openSpaceMgmtResumeDetail(sp.spaceId, doc)"
+                      >
+                        <span class="font-medium text-gray-900">{{ resumeRowPrimaryTitle(doc) }}</span>
+                        <span class="block text-[11px] text-gray-400 font-mono truncate mt-0.5" :title="doc.resumeId">{{ doc.resumeId }}</span>
+                      </li>
+                    </ul>
+                    <p v-else class="text-sm text-gray-400">该空间下暂无简历</p>
+                  </div>
+                  <div class="rounded-lg bg-white border border-gray-100 p-4 min-h-[5rem]">
+                    <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                      <p class="text-xs font-semibold text-gray-600">
+                        岗位（活跃 {{ activeJobsInMgmtRow(sp.jobs).length }} / 共 {{ sp.jobs?.length || 0 }}）
+                      </p>
+                      <button
+                        type="button"
+                        class="text-xs px-2 py-1 rounded-md border border-primary text-primary hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                        :disabled="!spaceMgmtCanOpenJobBind()"
+                        :title="
+                          !spaceMgmtCanOpenJobBind()
+                            ? '请先在「岗位管理」中添加至少一个岗位'
+                            : '从「岗位管理」列表选择一个岗位，在本空间建立绑定（新增副本）'
+                        "
+                        @click="openSpaceMgmtBindJobModal(sp.spaceId)"
+                      >
+                        绑定岗位
+                      </button>
+                    </div>
+                    <ul v-if="spaceMgmtJobsForDisplay(sp.jobs).length" class="text-sm text-gray-800 space-y-1.5 list-none m-0 p-0">
+                      <li
+                        v-for="j in spaceMgmtJobsForDisplay(sp.jobs)"
+                        :key="j.positionId"
+                        role="button"
+                        tabindex="0"
+                        class="rounded-md border border-gray-100 bg-gray-50/40 px-2 py-1.5 cursor-pointer hover:border-primary/50 hover:bg-blue-50/40 transition-colors outline-none focus:ring-2 focus:ring-primary/40"
+                        @click="openJobDetailModal(j)"
+                        @keydown.enter.prevent="openJobDetailModal(j)"
+                      >
+                        <div class="flex flex-wrap items-center gap-2">
+                          <span class="font-medium text-gray-900 min-w-0 flex-1">{{ jobBindLabel(j) }}</span>
+                          <span
+                            class="text-[10px] px-1.5 py-0.5 rounded shrink-0 font-medium"
+                            :class="
+                              (j.status || 'ACTIVE') === 'ACTIVE'
+                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                : 'bg-gray-100 text-gray-600 border border-gray-200'
+                            "
+                          >
+                            {{ (j.status || "ACTIVE") === "ACTIVE" ? "活跃" : "已关闭" }}
+                          </span>
+                        </div>
+                        <span class="block text-[11px] text-gray-400 font-mono truncate mt-0.5" :title="j.positionId">{{ j.positionId }}</span>
+                      </li>
+                    </ul>
+                    <p v-else class="text-sm text-gray-400">该空间下暂无岗位</p>
+                  </div>
+                </div>
+              </article>
             </div>
           </div>
         </section>
@@ -2229,11 +3439,11 @@ onBeforeUnmount(() => {
 
         <section v-if="activeTab === 'config'" class="fade-in space-y-6">
           <div
-            v-if="!currentSpaceId"
+            v-if="!currentUser"
             class="border border-amber-200 bg-amber-50 text-amber-900 text-sm rounded-lg px-4 py-3 flex items-start gap-2"
           >
             <i class="fa-solid fa-triangle-exclamation mt-0.5 shrink-0"></i>
-            <span>请先在左侧选择一个工作空间，平台配置按空间保存与加载。</span>
+            <span>请先登录；百炼连接配置按账号保存，与当前所选空间无关，同一账号下全部空间共享。</span>
           </div>
           <div class="bg-white rounded-lg shadow-card p-6">
             <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
@@ -2241,13 +3451,15 @@ onBeforeUnmount(() => {
                 <h2 class="text-lg font-semibold text-gray-800 flex items-center gap-2">
                   <i class="fa-solid fa-gear text-primary"></i>阿里云百炼连接配置
                 </h2>
-                <p class="text-sm text-gray-500 mt-1">配置 Base URL、API Key 与模型名称，供 JD 拆解等能力调用。</p>
+                <p class="text-sm text-gray-500 mt-1">
+                  配置 Base URL、API Key 与模型名称，供 JD 拆解等能力调用；作用域为当前登录账号，全空间共用同一份配置。
+                </p>
               </div>
               <div class="flex flex-wrap gap-2 shrink-0">
                 <button
                   type="button"
                   class="inline-flex items-center gap-2 px-4 py-2 bg-primary hover:bg-blue-700 text-white text-sm rounded-md transition-colors disabled:opacity-50"
-                  :disabled="!currentSpaceId"
+                  :disabled="!currentUser"
                   @click="saveBailianConfig"
                 >
                   <i class="fa-solid fa-floppy-disk"></i>保存配置
@@ -2255,13 +3467,23 @@ onBeforeUnmount(() => {
                 <button
                   type="button"
                   class="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                  :disabled="testingModelConfig || !currentSpaceId"
+                  :disabled="testingModelConfig || !currentUser"
                   @click="testBailianConfigConnection"
                 >
                   <i class="fa-solid fa-plug"></i>{{ testingModelConfig ? "测试中…" : "测试调用" }}
                 </button>
               </div>
             </div>
+            <p
+              v-if="isMockBailianTestEnabled()"
+              class="mb-4 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 leading-relaxed"
+            >
+              当前为 <strong>Mock 测试</strong>：点击「测试调用」不会请求后端。默认已改为走服务端
+              <code class="bg-white px-1 rounded text-gray-800">POST …/model-configs/test</code>
+              ；关闭本提示请去掉环境变量
+              <code class="bg-white px-1 rounded text-gray-800">VITE_MOCK_BAILIAN_TEST</code>
+              或设为 false。
+            </p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
               <label class="flex flex-col gap-1.5 text-gray-700 md:col-span-2">
                 <span class="font-medium">提供商</span>
@@ -2278,16 +3500,28 @@ onBeforeUnmount(() => {
                   v-model="modelConfig.baseUrl"
                   type="text"
                   class="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-                  placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"
+                  placeholder="OpenAI 兼容：https://dashscope.aliyuncs.com/compatible-mode/v1；Anthropic 网关：https://coding.dashscope.aliyuncs.com/apps/anthropic"
                 />
               </label>
               <label class="flex flex-col gap-1.5 text-gray-700 md:col-span-2">
-                <span class="font-medium">API 密钥</span>
+                <span class="font-medium flex flex-wrap items-center gap-2">
+                  API 密钥
+                  <button
+                    type="button"
+                    class="text-xs font-normal text-primary hover:underline"
+                    @click="showBailianApiKey = !showBailianApiKey"
+                  >
+                    {{ showBailianApiKey ? "隐藏" : "显示" }}
+                  </button>
+                </span>
                 <input
                   v-model="modelConfig.apiKey"
-                  type="password"
-                  class="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-                  placeholder="阿里云百炼 API Key"
+                  :type="showBailianApiKey ? 'text' : 'password'"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  class="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary font-mono text-sm"
+                  placeholder="阿里云百炼 API Key（留空保存将保留库中已有密钥）"
                 />
               </label>
               <label class="flex flex-col gap-1.5 text-gray-700 md:col-span-2">
@@ -2318,7 +3552,7 @@ onBeforeUnmount(() => {
               </label>
             </div>
             <p class="mt-6 text-xs text-gray-500 leading-relaxed">
-              配置写入当前空间；切换空间会自动加载对应配置。文档：
+              配置写入当前登录账号，切换工作空间不会切换百炼配置。文档：
               <a
                 class="text-primary hover:underline"
                 href="https://bailian.console.aliyun.com/cn-beijing?spm=5176.12818093_47.resourceCenter.1.408916d04lcOfi&tab=doc#/doc/?type=model&url=2840915"
@@ -2327,6 +3561,105 @@ onBeforeUnmount(() => {
                 >百炼控制台</a
               >。
             </p>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'db-inspector'" class="fade-in space-y-4">
+          <div v-if="currentUser?.phone !== DB_INSPECTOR_ALLOWED_PHONE" class="bg-white rounded-lg shadow-card p-8 text-center">
+            <i class="fa-solid fa-lock text-4xl text-amber-400 mb-3"></i>
+            <h2 class="text-lg font-semibold text-gray-800 mb-2">无权访问</h2>
+            <p class="text-gray-500 text-sm">库表看板仅限指定账号使用。</p>
+          </div>
+          <div v-else class="grid grid-cols-1 lg:grid-cols-4 gap-4 items-start">
+            <div class="lg:col-span-1 bg-white rounded-lg shadow-card p-4">
+              <h3 class="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                <i class="fa-solid fa-table text-primary"></i>数据表
+              </h3>
+              <p v-if="dbInspectorLoading && !dbInspectorTables.length" class="text-xs text-gray-500">加载中…</p>
+              <ul v-else class="max-h-[70vh] overflow-y-auto text-sm space-y-0.5 list-none m-0 p-0">
+                <li v-for="t in dbInspectorTables" :key="t">
+                  <button
+                    type="button"
+                    class="w-full text-left px-2 py-1.5 rounded truncate"
+                    :class="
+                      t === dbInspectorSelectedTable
+                        ? 'bg-blue-50 text-primary font-medium'
+                        : 'text-gray-700 hover:bg-gray-50'
+                    "
+                    @click="selectDbInspectorTable(t)"
+                  >
+                    {{ t }}
+                  </button>
+                </li>
+              </ul>
+            </div>
+            <div class="lg:col-span-3 bg-white rounded-lg shadow-card p-4 min-w-0">
+              <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <h3 class="text-sm font-semibold text-gray-700 truncate">
+                  <span v-if="dbInspectorSelectedTable">{{ dbInspectorSelectedTable }}</span>
+                  <span v-else class="text-gray-400">请选择左侧表</span>
+                </h3>
+                <div v-if="dbInspectorSelectedTable" class="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                  <span
+                    >{{ dbInspectorRowCount ? dbInspectorOffset + 1 : 0 }}–{{
+                      Math.min(dbInspectorOffset + dbInspectorRows.length, dbInspectorRowCount)
+                    }}
+                    / 共 {{ dbInspectorRowCount }} 行</span
+                  >
+                  <button
+                    type="button"
+                    class="px-2 py-1 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-40"
+                    :disabled="dbInspectorOffset <= 0 || dbInspectorLoading"
+                    @click="dbInspectorPrevPage"
+                  >
+                    上一页
+                  </button>
+                  <button
+                    type="button"
+                    class="px-2 py-1 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-40"
+                    :disabled="
+                      dbInspectorLoading ||
+                      !dbInspectorRowCount ||
+                      dbInspectorOffset + dbInspectorLimit >= dbInspectorRowCount
+                    "
+                    @click="dbInspectorNextPage"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+              <p v-if="dbInspectorLoading" class="text-sm text-gray-500 py-6 text-center">加载中…</p>
+              <div v-else-if="!dbInspectorSelectedTable" class="text-sm text-gray-500 py-6 text-center">暂无表或无权限</div>
+              <div v-else class="overflow-x-auto border border-gray-100 rounded-md">
+                <table class="min-w-full text-xs text-left border-collapse">
+                  <thead class="bg-gray-50 text-gray-600">
+                    <tr>
+                      <th
+                        v-for="c in dbInspectorColumns"
+                        :key="c"
+                        class="px-2 py-2 font-medium border-b border-gray-200 whitespace-nowrap"
+                      >
+                        {{ c }}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(row, ri) in dbInspectorRows" :key="ri" class="odd:bg-white even:bg-gray-50/80">
+                      <td
+                        v-for="c in dbInspectorColumns"
+                        :key="c + '-' + ri"
+                        class="px-2 py-1.5 border-b border-gray-100 align-top max-w-[20rem] break-words"
+                      >
+                        {{ formatDbInspectorCell(row[c]) }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="mt-3 text-[11px] text-gray-400 leading-relaxed">
+                每页最多 500 行（当前 {{ dbInspectorLimit }}）。敏感字段请注意环境安全；生产环境请移除此入口或改为更细审计。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -2549,22 +3882,19 @@ onBeforeUnmount(() => {
           </label>
           <div class="border-t border-gray-100 pt-4">
             <h4 class="text-sm font-semibold text-gray-800 mb-2">绑定资源</h4>
-            <p v-if="!currentSpaceId" class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
-              请先在侧栏选择「当前工作空间」，创建新空间时才能从该空间复制简历与岗位。
-            </p>
-            <p v-else-if="bindSourceResumes.length === 0 && bindSourceJobs.length === 0" class="text-xs text-gray-500 mb-3">
-              当前空间暂无简历或岗位数据，将创建空白空间；之后可在各模块中补充。
+            <p
+              v-if="bindSourceResumes.length === 0 && bindSourceJobs.length === 0"
+              class="text-xs text-gray-500 mb-3"
+            >
+              账号下暂无简历或岗位，将创建空白空间；之后可在「简历管理」「岗位管理」中新增，并在本弹窗或「空间管理」中绑定到新空间。
             </p>
             <div class="space-y-4">
               <div>
                 <p class="text-xs font-medium text-gray-600 mb-2">选择简历（单选）</p>
+                <p class="text-xs text-gray-500 mb-2 leading-relaxed">
+                  列表与「简历管理」一致，为当前账号下<strong>全部简历</strong>（与当前工作空间无关）。可不选；选中则在新建空间创建成功后<strong>关联</strong>该简历（同一份数据，不复制）。若在简历详情中有未保存修改，请先保存或重新打开本弹窗以刷新列表。
+                </p>
                 <div class="border border-gray-200 rounded-lg p-2 max-h-40 overflow-y-auto space-y-1 bg-gray-50/50">
-                  <label
-                    class="flex items-start gap-2 rounded-md px-2 py-2 text-sm cursor-pointer hover:bg-white transition-colors"
-                  >
-                    <input v-model="newSpaceBindResumeId" type="radio" name="newSpaceResume" value="" class="mt-1 text-primary" />
-                    <span class="text-gray-700">不复制简历</span>
-                  </label>
                   <label
                     v-for="r in bindSourceResumes"
                     :key="r.resumeId"
@@ -2574,15 +3904,26 @@ onBeforeUnmount(() => {
                       v-model="newSpaceBindResumeId"
                       type="radio"
                       name="newSpaceResume"
-                      :value="r.resumeId"
+                      :value="String(r.resumeId)"
                       class="mt-1 text-primary"
                     />
                     <span class="text-gray-800">{{ resumeBindLabel(r) }}</span>
                   </label>
                 </div>
+                <button
+                  v-if="newSpaceBindResumeId && bindSourceResumes.length"
+                  type="button"
+                  class="mt-2 text-xs text-primary hover:underline"
+                  @click="newSpaceBindResumeId = ''"
+                >
+                  清除选择
+                </button>
               </div>
               <div>
                 <p class="text-xs font-medium text-gray-600 mb-2">选择岗位（多选）</p>
+                <p class="text-xs text-gray-500 mb-2 leading-relaxed">
+                  列表与「岗位管理」一致，为当前账号下<strong>全部活跃岗位</strong>（与当前工作空间无关）；选中则在新空间创建成功后<strong>关联</strong>对应岗位（同一份数据，不复制）。
+                </p>
                 <div class="border border-gray-200 rounded-lg p-2 max-h-48 overflow-y-auto space-y-1 bg-gray-50/50">
                   <p v-if="bindSourceJobs.length === 0" class="text-xs text-gray-500 px-2 py-2">暂无活跃岗位</p>
                   <label
@@ -2670,6 +4011,116 @@ onBeforeUnmount(() => {
             @click="doRenameSpace"
           >
             确认重命名
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="showSpaceMgmtBindModal"
+      class="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+      @click.self="closeSpaceMgmtBindModal"
+    >
+      <div
+        class="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden slide-in-modal"
+        :class="panelModalDragging ? 'cursor-grabbing' : ''"
+        :style="{ transform: `translate(${panelModalOffset.x}px, ${panelModalOffset.y}px)` }"
+        @click.stop
+      >
+        <div
+          class="shrink-0 px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-2 cursor-move"
+          @pointerdown="onPanelModalHeaderPointerDown"
+        >
+          <div class="min-w-0">
+            <h3 class="text-lg font-bold text-gray-900 truncate">
+              {{ spaceMgmtBindKind === "job" ? "岗位关联" : "简历关联" }}「{{ spaceDisplayName(spaceMgmtBindTargetSpaceId) }}」
+            </h3>
+            <p v-if="spaceMgmtBindKind === 'job'" class="text-xs text-gray-500 mt-1 leading-relaxed">
+              列表与<strong>「岗位管理」</strong>一致（当前账号下<strong>全部活跃岗位</strong>）。右侧开关<strong>开</strong>表示已绑定本空间，<strong>关</strong>表示未绑定；点击即可绑定或解绑（同一份数据，不复制）。
+            </p>
+            <p v-else class="text-xs text-gray-500 mt-1 leading-relaxed">
+              列表与<strong>「简历管理」</strong>一致（当前账号下<strong>全部简历</strong>）。右侧开关<strong>开</strong>表示已绑定本空间，<strong>关</strong>表示未绑定；点击即可绑定或解绑。若某简历<strong>仅关联本空间</strong>，解绑时会提示并删除该简历数据。
+            </p>
+          </div>
+          <button type="button" class="p-2 text-gray-400 hover:text-gray-700 rounded-lg shrink-0" aria-label="关闭" @click="closeSpaceMgmtBindModal">
+            <i class="fa-solid fa-xmark text-lg"></i>
+          </button>
+        </div>
+        <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div v-if="spaceMgmtBindPickLoading" class="text-center py-10 text-gray-500 text-sm">正在加载…</div>
+          <div v-else-if="!spaceMgmtBindPickGroups.length" class="text-center py-10 text-sm text-gray-500">
+            暂无{{ spaceMgmtBindKind === "job" ? "岗位" : "简历" }}，请先在「{{ spaceMgmtBindKind === "job" ? "岗位管理" : "简历管理" }}」中维护。
+          </div>
+          <div v-else class="space-y-3">
+            <div
+              v-for="g in spaceMgmtBindPickGroups"
+              :key="g.spaceId || '_ungrouped'"
+              class="rounded-lg border border-gray-100 bg-gray-50/50 p-2"
+            >
+              <p v-if="g.name" class="text-xs font-semibold text-gray-700 mb-2 px-1">{{ g.name }}</p>
+              <ul class="space-y-2 list-none m-0 p-0">
+                <li
+                  v-for="item in g.items"
+                  :key="
+                    spaceMgmtBindKind === 'job'
+                      ? `${g.spaceId || ''}-${item.positionId}`
+                      : `${g.spaceId || ''}-${item.resumeId}`
+                  "
+                  class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-white border border-gray-100 px-3 py-2.5"
+                >
+                  <div class="min-w-0 flex-1 space-y-1">
+                    <p class="text-sm font-medium text-gray-900">
+                      {{ spaceMgmtBindKind === "job" ? jobBindLabel(item) : resumeRowPrimaryTitle(item) }}
+                    </p>
+                    <p class="text-[11px] text-gray-400 font-mono truncate">
+                      {{ spaceMgmtBindKind === "job" ? item.positionId : item.resumeId }}
+                    </p>
+                    <p
+                      v-if="spaceMgmtBindKind === 'job' ? spaceMgmtJobDupWarn(item) : spaceMgmtResumeDupWarn(item)"
+                      class="text-[10px] text-amber-800 leading-snug"
+                    >
+                      {{ spaceMgmtBindKind === "job" ? "目标空间已有同标签岗位，仍可绑定。" : "目标空间已有同名简历，仍可绑定。" }}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    :aria-checked="spaceMgmtBindKind === 'job' ? spaceMgmtJobBoundToTarget(item) : spaceMgmtResumeBoundToTarget(item)"
+                    class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-primary/35 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-40"
+                    :class="
+                      (spaceMgmtBindKind === 'job' ? spaceMgmtJobBoundToTarget(item) : spaceMgmtResumeBoundToTarget(item))
+                        ? 'border-primary bg-primary'
+                        : 'border-gray-300 bg-gray-200'
+                    "
+                    :disabled="spaceMgmtBindActionLoading"
+                    :title="
+                      (spaceMgmtBindKind === 'job' ? spaceMgmtJobBoundToTarget(item) : spaceMgmtResumeBoundToTarget(item))
+                        ? '点击解绑本空间'
+                        : '点击绑定到本空间'
+                    "
+                    @click="spaceMgmtBindKind === 'job' ? toggleSpaceMgmtBindJob(item) : toggleSpaceMgmtBindResume(item)"
+                  >
+                    <span
+                      class="pointer-events-none absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform duration-200 ease-out"
+                      :class="
+                        (spaceMgmtBindKind === 'job' ? spaceMgmtJobBoundToTarget(item) : spaceMgmtResumeBoundToTarget(item))
+                          ? 'translate-x-5'
+                          : 'translate-x-0'
+                      "
+                    ></span>
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <div class="shrink-0 px-5 py-3 border-t border-gray-100 flex justify-end bg-gray-50/80">
+          <button
+            type="button"
+            class="px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-white"
+            @click="closeSpaceMgmtBindModal"
+          >
+            关闭
           </button>
         </div>
       </div>
@@ -3315,6 +4766,75 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="spaceMgmtResumeDetailOpen"
+        class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4"
+        @click.self="closeSpaceMgmtResumeDetail"
+      >
+        <div
+          class="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-2xl max-h-[90vh] min-h-0 flex flex-col overflow-hidden slide-in-modal"
+          :class="panelModalDragging ? 'cursor-grabbing' : ''"
+          :style="{ transform: `translate(${panelModalOffset.x}px, ${panelModalOffset.y}px)` }"
+          @click.stop
+        >
+          <div
+            class="shrink-0 px-6 py-4 border-b border-gray-100 flex items-start justify-between gap-3 cursor-move"
+            @pointerdown="onPanelModalHeaderPointerDown"
+          >
+            <h3 class="text-lg font-bold text-gray-900 pr-4">简历详情（只读）</h3>
+            <button
+              type="button"
+              class="p-2 text-gray-400 hover:text-gray-700 rounded-lg shrink-0 transition-colors"
+              aria-label="关闭"
+              @click="closeSpaceMgmtResumeDetail"
+            >
+              <i class="fa-solid fa-xmark text-lg"></i>
+            </button>
+          </div>
+          <div class="min-h-0 flex-1 overflow-y-auto px-6 py-4 space-y-4 text-sm">
+            <div v-if="spaceMgmtResumeDetailLoading" class="text-center py-12 text-gray-500">加载中…</div>
+            <template v-else-if="spaceMgmtResumeDetailDoc">
+              <div class="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2 text-xs text-gray-600 space-y-1">
+                <p><span class="font-medium text-gray-700">所属空间：</span>{{ spaceMgmtResumeDetailSpaceLabel }}</p>
+                <p class="font-mono text-gray-500 break-all">resumeId：{{ spaceMgmtResumeDetailDoc.resumeId }}</p>
+                <p v-if="resumeUpdatedLabel(spaceMgmtResumeDetailDoc)">
+                  <span class="font-medium text-gray-700">更新：</span>{{ resumeUpdatedLabel(spaceMgmtResumeDetailDoc) }}
+                </p>
+              </div>
+              <div>
+                <p class="text-xs font-medium text-gray-500 mb-1">简历名称</p>
+                <p class="text-base font-semibold text-gray-900">{{ spaceMgmtResumeDetailDoc.name || "未命名简历" }}</p>
+              </div>
+              <div v-if="(spaceMgmtResumeDetailDoc.modules || []).length" class="space-y-3">
+                <p class="text-sm font-semibold text-gray-800">模块</p>
+                <div
+                  v-for="(m, midx) in spaceMgmtResumeDetailDoc.modules"
+                  :key="m.id || String(midx)"
+                  class="rounded-lg border border-gray-200 bg-white px-4 py-3"
+                >
+                  <p class="text-sm font-medium text-gray-900 border-b border-gray-100 pb-2 mb-2">{{ m.title || "未命名模块" }}</p>
+                  <pre class="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed m-0">{{ m.text || "（无正文）" }}</pre>
+                </div>
+              </div>
+              <p v-else class="text-sm text-gray-500 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">
+                暂无模块数据
+              </p>
+            </template>
+          </div>
+          <div class="shrink-0 px-6 py-4 border-t border-gray-100 flex justify-end bg-gray-50/80">
+            <button
+              type="button"
+              class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-white text-sm font-medium transition-colors min-h-[40px]"
+              @click="closeSpaceMgmtResumeDetail"
+            >
+              关闭
+            </button>
+          </div>
+        </div>
       </div>
     </Teleport>
 

@@ -1,7 +1,7 @@
 <script setup>
 /** @deprecated B 端岗位在 `App.vue`（activeTab === job）实现；本文件未接入路由，勿当作入口。 */
 import { ref, onMounted } from "vue";
-import { createJobPosition, listJobPositions, closeJobPosition } from "../api";
+import { createJobPosition, listAllJobPositions, listJobPositions, closeJobPosition } from "../api";
 import { useWorkspace } from "../composables/useWorkspace";
 
 const title = ref("示例岗位");
@@ -12,19 +12,22 @@ const rows = ref([]);
 const { currentSpaceId } = useWorkspace();
 
 async function refresh() {
-  if (!currentSpaceId.value) return;
+  if (!currentSpaceId.value) {
+    rows.value = await listAllJobPositions();
+    return;
+  }
   rows.value = await listJobPositions(currentSpaceId.value);
 }
 
 async function submit() {
-  if (!currentSpaceId.value) return;
-  await createJobPosition({
-    spaceId: currentSpaceId.value,
+  const payload = {
     title: title.value,
     company: company.value,
     location: location.value,
     baseRange: baseRange.value
-  });
+  };
+  if (currentSpaceId.value) payload.spaceId = currentSpaceId.value;
+  await createJobPosition(payload);
   await refresh();
 }
 

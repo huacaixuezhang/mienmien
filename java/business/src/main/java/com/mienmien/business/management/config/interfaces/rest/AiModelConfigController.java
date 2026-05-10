@@ -1,12 +1,13 @@
 package com.mienmien.business.management.config.interfaces.rest;
 
 import com.mienmien.business.management.application.dto.AiModelConfigResponse;
+import com.mienmien.business.management.application.dto.ModelConfigTestResponse;
+import com.mienmien.business.management.application.dto.TestModelConfigRequest;
 import com.mienmien.business.management.application.service.AiModelConfigApplicationService;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -22,28 +23,24 @@ public class AiModelConfigController {
         this.aiModelConfigApplicationService = aiModelConfigApplicationService;
     }
 
-    @GetMapping("/{spaceId}")
-    public AiModelConfigResponse getBySpace(@PathVariable("spaceId") String spaceId) {
-        return aiModelConfigApplicationService.getBySpace(spaceId);
+    /** 当前登录用户的模型配置（与空间无关）。 */
+    @GetMapping("/me")
+    public AiModelConfigResponse getMine() {
+        return aiModelConfigApplicationService.getMine();
     }
 
     @PutMapping
     @ResponseStatus(HttpStatus.OK)
     public AiModelConfigResponse upsert(@Valid @RequestBody UpsertAiModelConfigRequest req) {
-        return aiModelConfigApplicationService.upsert(
-                req.spaceId(),
-                req.provider(),
-                req.baseUrl(),
-                req.apiKey(),
-                req.modelName()
-        );
+        return aiModelConfigApplicationService.upsertMine(
+                req.provider(), req.baseUrl(), req.apiKey(), req.modelName());
     }
 
-    public record UpsertAiModelConfigRequest(
-            @NotBlank String spaceId,
-            String provider,
-            String baseUrl,
-            String apiKey,
-            String modelName) {
+    @PostMapping("/test")
+    public ModelConfigTestResponse test(@Valid @RequestBody TestModelConfigRequest req) {
+        return aiModelConfigApplicationService.testChatMine(req.testPrompt(), req.modelName());
+    }
+
+    public record UpsertAiModelConfigRequest(String provider, String baseUrl, String apiKey, String modelName) {
     }
 }

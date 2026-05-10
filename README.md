@@ -124,6 +124,7 @@ PR 合并前必须通过 `sdd-gate` 检查，否则无法合并。
 
 - 种子 SQL 在 `scripts/seed-mienmien.sql`（含 `CREATE DATABASE` / `USE MienMieApp`），表名前缀 `mm_` 表示 B/C 域数据同库隔离。
 - 若你曾在更早版本初始化过数据库且缺少 `mm_guidance_session.ended_at` 列，可一次性执行 `scripts/migrate-mm-guidance-ended-at.sql`。
+- 独立简历表 `mm_resume_document`：已包含在 `scripts/seed-mienmien.sql`；存量库可执行 `bash scripts/apply-migrate-mm-resume-document.sh`（读取根目录 `.env` 中 `DB_*`，SQL 内 `USE MienMieApp`）。
 - 简历版本唯一约束：`scripts/migrate-mm-resume-unique.sql`；岗位表：`scripts/migrate-mm-job-position-table.sql`。
 - C 端：`mienmien.consumer.stream-degraded=true` 时 `GET /api/v1/consumer/health/stream` 返回 503（`CON-5031`）；语音/拍照问题文本可通过实现 `ClientQuestionEnrichmentPolicy` 接入真实 ASR/视觉（默认 `NoOp`）。
 - 若本机 `3306` 已被占用，可修改 `docker-compose.yml` 端口映射或设置 `DB_PORT` 后再启动，并保证 Java 的 `spring.datasource.url` 使用相同端口。

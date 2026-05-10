@@ -26,6 +26,22 @@ public class JobPositionController {
         this.jobPositionApplicationService = jobPositionApplicationService;
     }
 
+    /** 当前用户全部岗位（每份一条，含 spaceIds） */
+    @GetMapping
+    public List<JobPositionResponse> listMine() {
+        return jobPositionApplicationService.listMine();
+    }
+
+    @GetMapping("/item/{positionId}")
+    public JobPositionResponse getJobPosition(@PathVariable("positionId") String positionId) {
+        return jobPositionApplicationService.getForOwner(positionId);
+    }
+
+    @GetMapping("/by-space/{spaceId}")
+    public List<JobPositionResponse> listJobPositions(@PathVariable("spaceId") String spaceId) {
+        return jobPositionApplicationService.listBySpace(spaceId);
+    }
+
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public JobPositionResponse createJobPosition(@Valid @RequestBody UpsertJobPositionRequest req) {
@@ -38,23 +54,19 @@ public class JobPositionController {
         );
     }
 
-    @GetMapping("/{spaceId}")
-    public List<JobPositionResponse> listJobPositions(@PathVariable("spaceId") String spaceId) {
-        return jobPositionApplicationService.listBySpace(spaceId);
-    }
-
     @PutMapping("/item/{positionId}")
     public JobPositionResponse updateJobPosition(@PathVariable("positionId") String positionId, @Valid @RequestBody UpdateJobPositionRequest req) {
         return jobPositionApplicationService.update(positionId, req.title(), req.company(), req.location(), req.baseRange());
     }
 
     @DeleteMapping("/item/{positionId}")
-    public JobPositionResponse closeJobPosition(@PathVariable("positionId") String positionId) {
-        return jobPositionApplicationService.close(positionId);
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteJobPosition(@PathVariable("positionId") String positionId) {
+        jobPositionApplicationService.deleteEntire(positionId);
     }
 
     public record UpsertJobPositionRequest(
-            @NotBlank String spaceId,
+            String spaceId,
             @NotBlank String title,
             String company,
             String location,

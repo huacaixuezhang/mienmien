@@ -21,9 +21,10 @@ echo "$SPACE_JSON"
 SPACE_ID="$(printf '%s' "$SPACE_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.spaceId);")"
 
 echo "[check] B resume / jd / interview smoke"
-curl -fsS -X POST http://localhost:8080/api/v1/business/resumes -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
-  -d "{\"spaceId\":\"$SPACE_ID\",\"content\":\"hello\",\"version\":1}" >/dev/null
-curl -fsS "http://localhost:8080/api/v1/business/resumes/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS -X POST "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
+  -d '{"name":"验收简历","modules":[{"id":"m1","title":"模块1","text":"hello"}]}' >/dev/null
+curl -fsS "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS "http://localhost:8080/api/v1/business/resume-documents" "${BIZ_AUTH[@]}" >/dev/null
 curl -fsS -X POST http://localhost:8080/api/v1/business/jd-targets -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
   -d "{\"spaceId\":\"$SPACE_ID\",\"rawText\":\"jd\",\"focusPoints\":\"fp\"}" >/dev/null
 curl -fsS "http://localhost:8080/api/v1/business/jd-targets/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
@@ -39,13 +40,14 @@ curl -fsS -X PUT "http://localhost:8080/api/v1/business/spaces/$SPACE_ID" -H "Co
 echo "[check] delete empty space -> 200"
 EMPTY_SPACE_JSON="$(curl -fsS -X POST http://localhost:8080/api/v1/business/spaces -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"待删除空间"}')"
 EMPTY_SPACE_ID="$(printf '%s' "$EMPTY_SPACE_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.spaceId);")"
+curl -fsS -X DELETE "http://localhost:8080/api/v1/business/spaces/$EMPTY_SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
 curl -fsS -X DELETE "http://localhost:8080/api/v1/business/spaces/$EMPTY_SPACE_ID/hard" "${BIZ_AUTH[@]}" >/dev/null
 
 echo "[check] job positions"
 JP_JSON="$(curl -fsS -X POST http://localhost:8080/api/v1/business/job-positions -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d "{\"spaceId\":\"$SPACE_ID\",\"title\":\"后端工程师\",\"company\":\"Acme\",\"location\":\"上海\",\"baseRange\":\"30-50K\"}")"
 echo "$JP_JSON"
 JP_ID="$(printf '%s' "$JP_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.positionId);")"
-curl -fsS "http://localhost:8080/api/v1/business/job-positions/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS "http://localhost:8080/api/v1/business/job-positions/by-space/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
 curl -fsS -X DELETE "http://localhost:8080/api/v1/business/job-positions/item/$JP_ID" "${BIZ_AUTH[@]}" >/dev/null
 
 echo "[check] standard answer bank"
@@ -53,15 +55,11 @@ curl -fsS -X PUT http://localhost:8080/api/v1/business/answer-banks -H "Content-
   -d "{\"spaceId\":\"$SPACE_ID\",\"intro\":\"i\",\"reason\":\"r\",\"strengths\":\"s\",\"project\":\"p\",\"hr\":\"h\"}" >/dev/null
 curl -fsS "http://localhost:8080/api/v1/business/answer-banks/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
 
-echo "[check] resume version conflict -> 409"
-RES_V=$((RANDOM % 80000 + 10000))
-curl -fsS -X POST http://localhost:8080/api/v1/business/resumes -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d "{\"spaceId\":\"$SPACE_ID\",\"content\":\"v${RES_V}\",\"version\":${RES_V}}" >/dev/null
-C409="$(curl -s -o /tmp/mm-res-dup.json -w "%{http_code}" -X POST http://localhost:8080/api/v1/business/resumes -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d "{\"spaceId\":\"$SPACE_ID\",\"content\":\"dup\",\"version\":${RES_V}}")"
-if [[ "$C409" != "409" ]]; then
-  echo "expected HTTP 409 duplicate resume version, got $C409"
-  cat /tmp/mm-res-dup.json || true
-  exit 1
-fi
+echo "[check] resume document update"
+RD_JSON="$(curl -fsS -X POST "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"版本二","modules":[{"id":"x1","title":"A","text":"a"}]}')"
+RD_ID="$(printf '%s' "$RD_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.resumeId);")"
+curl -fsS -X PUT "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents/$RD_ID" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
+  -d '{"name":"版本二改","modules":[{"id":"x1","title":"A","text":"b"}]}' >/dev/null
 
 echo "[check] consumer stream health"
 curl -fsS http://localhost:8081/api/v1/consumer/health/stream >/dev/null

@@ -43,6 +43,26 @@ CREATE TABLE IF NOT EXISTS mm_resume (
   UNIQUE KEY uk_resume_space_version (space_id, version)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS mm_resume_document (
+  resume_id VARCHAR(64) NOT NULL PRIMARY KEY,
+  user_id VARCHAR(64) NOT NULL,
+  name VARCHAR(256) NOT NULL,
+  modules_json LONGTEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_resume_document_user (user_id),
+  CONSTRAINT fk_resume_document_user FOREIGN KEY (user_id) REFERENCES mm_user_account (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS mm_resume_document_space (
+  resume_id VARCHAR(64) NOT NULL,
+  space_id VARCHAR(64) NOT NULL,
+  PRIMARY KEY (resume_id, space_id),
+  KEY idx_rds_space (space_id),
+  CONSTRAINT fk_rds_resume FOREIGN KEY (resume_id) REFERENCES mm_resume_document (resume_id) ON DELETE CASCADE,
+  CONSTRAINT fk_rds_space FOREIGN KEY (space_id) REFERENCES mm_space (space_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS mm_job_position (
   position_id VARCHAR(64) NOT NULL PRIMARY KEY,
   space_id VARCHAR(64) NOT NULL,
@@ -91,13 +111,13 @@ CREATE TABLE IF NOT EXISTS mm_interview_record (
 
 CREATE TABLE IF NOT EXISTS mm_ai_model_config (
   config_id VARCHAR(64) NOT NULL PRIMARY KEY,
-  space_id VARCHAR(64) NOT NULL,
+  owner_user_id VARCHAR(64) NOT NULL,
   provider VARCHAR(64) NOT NULL DEFAULT 'aliyun-bailian',
   base_url VARCHAR(512) NOT NULL DEFAULT '',
   api_key VARCHAR(1024) NOT NULL DEFAULT '',
   model_name VARCHAR(128) NOT NULL DEFAULT '',
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_ai_model_config_space (space_id)
+  UNIQUE KEY uk_ai_model_config_user (owner_user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS mm_guidance_session (

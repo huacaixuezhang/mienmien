@@ -9,5 +9,7 @@ public interface UserAccountRepository {
 
     Optional<UserAccount> findByPhone(String phone);
 
+    Optional<UserAccount> findByUserId(String userId);
+
     void updatePasswordDigest(String userId, String passwordDigest);
 }

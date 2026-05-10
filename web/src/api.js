@@ -102,16 +102,80 @@ export async function restoreSpace(spaceId) {
   return fetchJson(`${BIZ}/spaces/${spaceId}/restore`, { method: "POST" });
 }
 
-export async function createResume(payload) {
-  return fetchJson(`${BIZ}/resumes`, {
+export async function listResumeDocuments(spaceId) {
+  return fetchJson(`${BIZ}/spaces/${encodeURIComponent(spaceId)}/resume-documents`);
+}
+
+export async function getResumeDocument(spaceId, resumeId) {
+  return fetchJson(
+    `${BIZ}/spaces/${encodeURIComponent(spaceId)}/resume-documents/${encodeURIComponent(resumeId)}`
+  );
+}
+
+export async function createResumeDocument(spaceId, payload) {
+  return fetchJson(`${BIZ}/spaces/${encodeURIComponent(spaceId)}/resume-documents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
 }
 
-export async function listResumes(spaceId) {
-  return fetchJson(`${BIZ}/resumes/${spaceId}`);
+export async function updateResumeDocument(spaceId, resumeId, payload) {
+  return fetchJson(
+    `${BIZ}/spaces/${encodeURIComponent(spaceId)}/resume-documents/${encodeURIComponent(resumeId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function deleteResumeDocument(spaceId, resumeId) {
+  return fetchJson(
+    `${BIZ}/spaces/${encodeURIComponent(spaceId)}/resume-documents/${encodeURIComponent(resumeId)}`,
+    { method: "DELETE" }
+  );
+}
+
+/** 当前用户全部简历（每份一条，含 spaceIds） */
+export async function listAllResumeDocuments() {
+  return fetchJson(`${BIZ}/resume-documents`);
+}
+
+/** 创建简历；body 含 name、modules，可选 spaceId（有当前工作空间时带上即可自动关联） */
+export async function createResumeDocumentMine(payload) {
+  return fetchJson(`${BIZ}/resume-documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function getResumeDocumentById(resumeId) {
+  return fetchJson(`${BIZ}/resume-documents/${encodeURIComponent(resumeId)}`);
+}
+
+/** 更新简历正文（不依赖空间路径；适用于尚未关联任何空间的简历） */
+export async function updateResumeDocumentById(resumeId, payload) {
+  return fetchJson(`${BIZ}/resume-documents/${encodeURIComponent(resumeId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+/** 将已有简历关联到目标空间（幂等） */
+export async function linkResumeToSpace(spaceId, resumeId) {
+  return fetchJson(
+    `${BIZ}/spaces/${encodeURIComponent(spaceId)}/resume-documents/${encodeURIComponent(resumeId)}/link`,
+    { method: "POST" }
+  );
+}
+
+/** 删除简历及其全部空间关联 */
+export async function deleteResumeDocumentEntire(resumeId) {
+  return fetchJson(`${BIZ}/resume-documents/${encodeURIComponent(resumeId)}`, { method: "DELETE" });
 }
 
 export async function createJd(payload) {
@@ -155,7 +219,30 @@ export async function createJobPosition(payload) {
 }
 
 export async function listJobPositions(spaceId) {
-  return fetchJson(`${BIZ}/job-positions/${spaceId}`);
+  return fetchJson(`${BIZ}/job-positions/by-space/${encodeURIComponent(spaceId)}`);
+}
+
+export async function listAllJobPositions() {
+  return fetchJson(`${BIZ}/job-positions`);
+}
+
+export async function getJobPositionById(positionId) {
+  return fetchJson(`${BIZ}/job-positions/item/${encodeURIComponent(positionId)}`);
+}
+
+export async function linkJobToSpace(spaceId, positionId) {
+  return fetchJson(
+    `${BIZ}/spaces/${encodeURIComponent(spaceId)}/job-positions/${encodeURIComponent(positionId)}/link`,
+    { method: "POST" }
+  );
+}
+
+/** 从指定空间解除岗位关联（不删除岗位主体） */
+export async function unlinkJobFromSpace(spaceId, positionId) {
+  return fetchJson(
+    `${BIZ}/spaces/${encodeURIComponent(spaceId)}/job-positions/${encodeURIComponent(positionId)}/link`,
+    { method: "DELETE" }
+  );
 }
 
 export async function updateJobPosition(positionId, payload) {
@@ -182,8 +269,8 @@ export async function saveAnswerBank(payload) {
   });
 }
 
-export async function getModelConfig(spaceId) {
-  return fetchJson(`${BIZ}/model-configs/${spaceId}`);
+export async function getModelConfig() {
+  return fetchJson(`${BIZ}/model-configs/me`);
 }
 
 export async function saveModelConfig(payload) {
@@ -192,6 +279,28 @@ export async function saveModelConfig(payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
+}
+
+/** 服务端读取库中 API Key / Base URL，按传入提示词与模型名调用大模型（测试调用）。 */
+export async function testModelConfig(payload) {
+  return fetchJson(`${BIZ}/model-configs/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+/** 库表看板：当前库所有表名（需后端允许的手机号登录）。 */
+export async function listDbInspectorTables() {
+  return fetchJson(`${BIZ}/admin/db-inspector/tables`);
+}
+
+/** 库表看板：分页读取指定表数据。 */
+export async function listDbInspectorTableRows(tableName, offset = 0, limit = 100) {
+  const q = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  return fetchJson(
+    `${BIZ}/admin/db-inspector/tables/${encodeURIComponent(tableName)}/rows?${q.toString()}`
+  );
 }
 
 export async function registerByPhone(payload) {

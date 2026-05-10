@@ -6,11 +6,11 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * 岗位实体（首期由 JdTarget 之外的独立表承载，便于扩展编制与状态）。
+ * 岗位实体；与空间的关联由应用服务维护（多对多）。
  */
 public final class JobPosition {
     private final String positionId;
-    private final String spaceId;
+    private final String userId;
     private String title;
     private String company;
     private String location;
@@ -21,7 +21,7 @@ public final class JobPosition {
 
     private JobPosition(
             String positionId,
-            String spaceId,
+            String userId,
             String title,
             String company,
             String location,
@@ -30,7 +30,7 @@ public final class JobPosition {
             Instant createdAt,
             Instant updatedAt) {
         this.positionId = Objects.requireNonNull(positionId);
-        this.spaceId = Objects.requireNonNull(spaceId);
+        this.userId = Objects.requireNonNull(userId);
         this.title = Objects.requireNonNull(title);
         this.company = Objects.requireNonNull(company);
         this.location = Objects.requireNonNull(location);
@@ -42,13 +42,13 @@ public final class JobPosition {
 
     public static JobPosition createNew(
             String positionId,
-            String spaceId,
+            String userId,
             String title,
             String company,
             String location,
             String baseRange) {
-        if (spaceId == null || spaceId.isBlank()) {
-            throw new DomainException("BUS-4001", "spaceId 不能为空");
+        if (userId == null || userId.isBlank()) {
+            throw new DomainException("BUS-4001", "userId 不能为空");
         }
         if (title == null || title.isBlank()) {
             throw new DomainException("BUS-4001", "岗位标题不能为空");
@@ -56,7 +56,7 @@ public final class JobPosition {
         Instant now = Instant.now();
         return new JobPosition(
                 positionId,
-                spaceId,
+                userId,
                 title.trim(),
                 company == null ? "" : company.trim(),
                 location == null ? "" : location.trim(),
@@ -69,7 +69,7 @@ public final class JobPosition {
 
     public static JobPosition restore(
             String positionId,
-            String spaceId,
+            String userId,
             String title,
             String company,
             String location,
@@ -77,7 +77,7 @@ public final class JobPosition {
             String status,
             Instant createdAt,
             Instant updatedAt) {
-        return new JobPosition(positionId, spaceId, title, company, location, baseRange, status, createdAt, updatedAt);
+        return new JobPosition(positionId, userId, title, company, location, baseRange, status, createdAt, updatedAt);
     }
 
     public void updateProfile(String title, String company, String location, String baseRange) {
@@ -106,8 +106,8 @@ public final class JobPosition {
         return positionId;
     }
 
-    public String getSpaceId() {
-        return spaceId;
+    public String getUserId() {
+        return userId;
     }
 
     public String getTitle() {

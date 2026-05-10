@@ -5,7 +5,7 @@ import java.util.Objects;
 
 public final class AiModelConfig {
     private final String configId;
-    private final String spaceId;
+    private final String ownerUserId;
     private String provider;
     private String baseUrl;
     private String apiKey;
@@ -14,14 +14,14 @@ public final class AiModelConfig {
 
     private AiModelConfig(
             String configId,
-            String spaceId,
+            String ownerUserId,
             String provider,
             String baseUrl,
             String apiKey,
             String modelName,
             Instant updatedAt) {
         this.configId = Objects.requireNonNull(configId);
-        this.spaceId = Objects.requireNonNull(spaceId);
+        this.ownerUserId = Objects.requireNonNull(ownerUserId);
         this.provider = normalize(provider, "aliyun-bailian");
         this.baseUrl = normalize(baseUrl, "");
         this.apiKey = normalize(apiKey, "");
@@ -31,23 +31,23 @@ public final class AiModelConfig {
 
     public static AiModelConfig createNew(
             String configId,
-            String spaceId,
+            String ownerUserId,
             String provider,
             String baseUrl,
             String apiKey,
             String modelName) {
-        return new AiModelConfig(configId, spaceId, provider, baseUrl, apiKey, modelName, Instant.now());
+        return new AiModelConfig(configId, ownerUserId, provider, baseUrl, apiKey, modelName, Instant.now());
     }
 
     public static AiModelConfig restore(
             String configId,
-            String spaceId,
+            String ownerUserId,
             String provider,
             String baseUrl,
             String apiKey,
             String modelName,
             Instant updatedAt) {
-        return new AiModelConfig(configId, spaceId, provider, baseUrl, apiKey, modelName, updatedAt);
+        return new AiModelConfig(configId, ownerUserId, provider, baseUrl, apiKey, modelName, updatedAt);
     }
 
     public void update(String provider, String baseUrl, String apiKey, String modelName) {
@@ -70,8 +70,8 @@ public final class AiModelConfig {
         return configId;
     }
 
-    public String getSpaceId() {
-        return spaceId;
+    public String getOwnerUserId() {
+        return ownerUserId;
     }
 
     public String getProvider() {
