@@ -76,8 +76,18 @@ if [[ "$RUN_BACKEND" -eq 1 ]]; then
   PIDS+=("$BUSINESS_PID")
 
   echo "[4/5] 启动 consumer 服务..."
+  # 百炼 Key 以 consumer 的 application.yml 为准；启动前丢弃可能从 .env 继承的旧变量，避免覆盖 yml。
+  unset DASHSCOPE_API_KEY 2>/dev/null || true
+  unset SPRING_AI_DASHSCOPE_API_KEY 2>/dev/null || true
   cd "$ROOT_DIR/java/consumer"
-  nohup env DB_NAME="${DB_NAME:-MienMieApp}" DB_HOST="${DB_HOST:-localhost}" DB_PORT="${DB_PORT:-3306}" DB_USER="${DB_USER:-root}" DB_PASSWORD="${DB_PASSWORD:-}" mvn spring-boot:run > "$ROOT_DIR/.consumer.log" 2>&1 &
+  nohup env \
+    DB_NAME="${DB_NAME:-MienMieApp}" \
+    DB_HOST="${DB_HOST:-localhost}" \
+    DB_PORT="${DB_PORT:-3306}" \
+    DB_USER="${DB_USER:-root}" \
+    DB_PASSWORD="${DB_PASSWORD:-}" \
+    VIDEO_INTERVIEW_DASHSCOPE_BASE_URL="${VIDEO_INTERVIEW_DASHSCOPE_BASE_URL:-}" \
+    mvn spring-boot:run > "$ROOT_DIR/.consumer.log" 2>&1 &
   CONSUMER_PID=$!
   PIDS+=("$CONSUMER_PID")
 else
@@ -97,6 +107,33 @@ else
 fi
 
 printf "%s\n" "${PIDS[@]}" > "$ROOT_DIR/.dev-pids"
+
+# 监听 Java 源码变更并增量编译，配合 spring-boot-devtools 触发热重启。
+# 默认开启（DEV_BACKEND_COMPILE_WATCH 未设为 0 且本机已安装 fswatch）；关闭：DEV_BACKEND_COMPILE_WATCH=0 bash scripts/dev-up.sh
+if [[ "$RUN_BACKEND" == "1" ]] && [[ "${DEV_BACKEND_COMPILE_WATCH:-1}" != "0" ]]; then
+  if command -v fswatch >/dev/null 2>&1; then
+    echo "[watch] fswatch → mvn compile（business / consumer），配合 devtools 自动重启"
+    (
+      cd "$ROOT_DIR/java/business"
+      while fswatch -1 -l 1.2 ./src/main/java ./src/main/resources 2>/dev/null; do
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] business compile" >>"$ROOT_DIR/.business-watch.log"
+        mvn -q compile >>"$ROOT_DIR/.business-watch.log" 2>&1 || true
+      done
+    ) &
+    echo $! >> "$ROOT_DIR/.dev-pids"
+    (
+      cd "$ROOT_DIR/java/consumer"
+      while fswatch -1 -l 1.2 ./src/main/java ./src/main/resources 2>/dev/null; do
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] consumer compile" >>"$ROOT_DIR/.consumer-watch.log"
+        mvn -q compile >>"$ROOT_DIR/.consumer-watch.log" 2>&1 || true
+      done
+    ) &
+    echo $! >> "$ROOT_DIR/.dev-pids"
+  else
+    echo "[watch] 未检测到 fswatch：已启用 spring-boot-devtools；另开终端在对应模块执行 mvn compile 亦可触发热重启。安装：brew install fswatch"
+  fi
+fi
+
 echo "全部服务已启动"
 if [[ "${BUSINESS_PID:-}" != "" ]]; then
   echo "business pid: $BUSINESS_PID"

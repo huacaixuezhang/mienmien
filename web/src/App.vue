@@ -5,11 +5,21 @@ import {
   averageQuestionScore,
   defaultQuestion,
   defaultRound,
+  enrichVoiceTurnLabelsWhenMultiSession,
+  ensureRoundsCoverVideoRoundIndex,
+  extractVoiceTurnScoreFromEvaluationJson,
+  finalizeInterviewRoundsAfterLoad,
   firstRoundInterviewType,
+  formatVoiceTurnQuestionLabel,
   migrateV2ToV3,
+  newQuestionId,
+  normalizeInterviewConclusion,
   parseInterviewPayload,
-  serializeV3
+  prepareInterviewRoundsForPersist,
+  serializeV3,
+  syncInterviewConclusionOverallScoreFromQuestions
 } from "./utils/interviewV3";
+import { exportResumeDocumentToPdf } from "./application/resumePdfExport";
 import {
   createSpace,
   listSpaces,
@@ -28,8 +38,21 @@ import {
   deleteResumeDocumentEntire,
   linkResumeToSpace,
   createInterview,
+  updateInterview,
   listInterview,
+  createVideoInterviewSession,
+  listVideoInterviewTurns,
+  listInterviewerStyles,
+  createInterviewerStyle,
+  updateInterviewerStyle,
+  deleteInterviewerStyle,
+  listInterviewerRoles,
+  createInterviewerRole,
+  updateInterviewerRole,
+  deleteInterviewerRole,
   createJobPosition,
+  parseJobPositionJd,
+  parseJobPositionFromImage,
   updateJobPosition,
   listJobPositions,
   listAllJobPositions,
@@ -48,14 +71,21 @@ import {
   logoutSession,
   USER_SESSION_STORAGE_KEY
 } from "./api";
+import { BUILTIN_INTERVIEWER_STYLES, CUSTOM_INTERVIEWER_STYLE_TEMPLATE } from "./constants/interviewerBuiltinPrompts.js";
+import { BUILTIN_INTERVIEWER_ROLE_OPTIONS } from "./constants/interviewerRolePresets.js";
+import { interviewerStyleLabel } from "./utils/interviewerStyleResolve.js";
 import InterviewRoundsPanel from "./components/InterviewRoundsPanel.vue";
+import VideoInterviewRoom from "./components/VideoInterviewRoom.vue";
+import GlobalVoiceprintSettings from "./components/GlobalVoiceprintSettings.vue";
 import {
   JOB_TYPE_OPTIONS,
   decodeJobBaseRange,
   encodeJobBaseRange,
+  jdPlainToSimpleHtml,
   jobTypeBadgeClass,
   jobTypeLabel
 } from "./utils/jobMeta";
+import { compressResumePayload } from "./utils/resumeHtmlCompress";
 
 /** 侧栏「当前空间」：题库与面试 */
 const sidebarSpaceNav = [
@@ -164,6 +194,8 @@ const resumeDisplayName = ref("");
 /** 与上次保存一致的 JSON 快照，用于判断草稿是否变更 */
 const resumeDraftBaseline = ref("");
 const creatingResume = ref(false);
+/** 正在导出 PDF 的 resumeId，用于防重复点击与按钮文案 */
+const resumeExportingId = ref("");
 const resumeSaveLoading = ref(false);
 const draggingResumeIndex = ref(-1);
 const newResumeBlockTitle = ref("");
@@ -186,9 +218,10 @@ const answerCards = reactive(defaultAnswerCards());
 const newAnswerCardTitle = ref("");
 const draggingAnswerIndex = ref(-1);
 
-/** 编辑岗位弹窗内：粘贴完整 JD 仅用于一键拆解考点，不单独入库 */
+/** 岗位弹窗内：粘贴完整 JD，用于一键解析回填各字段（考点、描述、jdDetail 随 base_range 入库） */
 const jobModalJdPaste = ref("");
 const jobModalJdAnalyzing = ref(false);
+const jobModalJdImageInputRef = ref(null);
 
 const jobSearchQuery = ref("");
 const jobModalOpen = ref(false);
@@ -213,6 +246,10 @@ const jobModalDraft = reactive({
   focusPoints: ""
 });
 const jobRichEditorRef = ref(null);
+/** 当前聚焦的简历模块正文（contenteditable），与岗位 JD 共用 execCommand */
+const resumeRichTargetRef = ref(null);
+/** block.id → 模块正文 DOM，用于从模型刷新 innerHTML */
+const resumeBlockBodyEls = new Map();
 const jobDeleteConfirmId = ref("");
 const jobDeleteLoading = ref(false);
 
@@ -247,8 +284,33 @@ const mockJobProfile = reactive({
 });
 const mockInterviewRounds = reactive([]);
 
+/** 模拟面试：列表 / 详情；多条记录按卡片进入 */
+const mockUiPhase = ref("list");
+const selectedMockRecordId = ref("");
+const lastMockSessionMeta = ref({});
+/** 正式面试：列表 / 详情 */
+const realUiPhase = ref("list");
+const selectedRealRecordId = ref("");
+const lastRealSessionMeta = ref({});
+/** 语音终局总评（summary.meta.videoInterviewMeta），供详情面板只读展示 */
+const mockRecordVideoInterviewMeta = computed(() => {
+  const m = lastMockSessionMeta.value?.videoInterviewMeta;
+  return m && typeof m === "object" ? m : null;
+});
+const realRecordVideoInterviewMeta = computed(() => {
+  const m = lastRealSessionMeta.value?.videoInterviewMeta;
+  return m && typeof m === "object" ? m : null;
+});
+/** 创建面试会话：选择当前空间下已绑定岗位 */
+const createInterviewSessionModalOpen = ref(false);
+const createInterviewSessionKind = ref("mock");
+const createInterviewSessionJobId = ref("");
+
 const addInterviewModalOpen = ref(false);
 const addQuestionModalOpen = ref(false);
+const videoInterviewRoomOpen = ref(false);
+const videoInterviewSessionPayload = ref(null);
+const videoInterviewRoomContext = ref({ forMock: true, roundIndex: 0, roundTitle: "" });
 const interviewModalForMock = ref(false);
 const questionModalForMock = ref(false);
 const editingRoundIndex = ref(-1);
@@ -259,6 +321,7 @@ const interviewDraft = reactive({
   timeText: "",
   locationMode: "线上",
   category: "技术面",
+  interviewerStyleKey: "builtin_general",
   interviewers: [{ role: "HR", name: "" }]
 });
 const questionDraft = reactive({
@@ -278,6 +341,72 @@ const sidebarOpen = ref(false);
 
 const resumes = ref([]);
 const jobs = ref([]);
+/** 用户自定义面试官风格（全空间共用，按账号存后端） */
+const interviewerCustomStyles = ref([]);
+const styleEditorOpen = ref(false);
+const styleEditorMode = ref("create");
+const styleEditorId = ref("");
+const styleEditorTitle = ref("");
+const styleEditorPrompt = ref("");
+const styleEditorSaving = ref(false);
+
+/** 用户自定义面试官角色（按账号存后端，与空间无关） */
+const interviewerRoleCatalog = ref([]);
+const roleEditorOpen = ref(false);
+const roleEditorMode = ref("create");
+const roleEditorId = ref("");
+const roleEditorRoleCode = ref("");
+const roleEditorRoleName = ref("");
+const roleEditorInterviewContent = ref("");
+const roleEditorFocusPoints = ref("");
+const roleEditorEvaluationHint = ref("");
+const roleEditorSaving = ref(false);
+
+/** 内置角色只读详情弹窗 */
+const builtinRoleDetailOpen = ref(false);
+const builtinRoleDetail = ref(null);
+
+const interviewerStyleSelectOptions = computed(() => {
+  const builtins = BUILTIN_INTERVIEWER_STYLES.map((s) => ({ value: s.key, label: s.label }));
+  const customs = (interviewerCustomStyles.value || []).map((s) => ({
+    value: String(s.styleId),
+    label: `${(s.title || "").trim() || "未命名"}（自定义）`
+  }));
+  return [...builtins, ...customs];
+});
+
+const interviewerRoleModalSelectOptions = computed(() => {
+  const customs = (interviewerRoleCatalog.value || []).map((r) => ({
+    value: String(r.roleCode || "").trim(),
+    label: `${String(r.roleCode || "").trim()} — ${(r.roleName || "").trim() || "未命名"}（自定义）`
+  }));
+  const presets = BUILTIN_INTERVIEWER_ROLE_OPTIONS.map((r) => ({
+    value: r.code,
+    label: `${r.code} — ${r.name}`
+  }));
+  const seen = new Set();
+  const out = [];
+  for (const row of customs) {
+    if (!row.value) continue;
+    const k = row.value.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(row);
+  }
+  for (const row of presets) {
+    const k = row.value.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(row);
+  }
+  const draftUsesP = (interviewDraft.interviewers || []).some(
+    (s) => String(s?.role || "").trim().toLowerCase() === "p"
+  );
+  if (draftUsesP && !seen.has("p")) {
+    out.push({ value: "P", label: "P — 与 peer 相同（旧代号，建议改为 peer）" });
+  }
+  return out;
+});
 
 const sortedResumeList = computed(() =>
   [...(Array.isArray(resumes.value) ? resumes.value : [])].sort((a, b) => {
@@ -331,6 +460,24 @@ const dbInspectorRows = ref([]);
 const dbInspectorRowCount = ref(0);
 const dbInspectorOffset = ref(0);
 const dbInspectorLimit = ref(100);
+/** 岗位信息约定表名（与 scripts/migrate-mm-job-position-table.sql 一致） */
+const MM_JOB_POSITION_TABLE = "mm_job_position";
+
+/** 库表看板左侧：将 mm_job_position 置顶便于查找 */
+const dbInspectorTablesSorted = computed(() => {
+  const list = [...(dbInspectorTables.value || [])];
+  const i = list.indexOf(MM_JOB_POSITION_TABLE);
+  if (i > 0) {
+    list.splice(i, 1);
+    list.unshift(MM_JOB_POSITION_TABLE);
+  }
+  return list;
+});
+
+function dbInspectorTableSidebarLabel(tableName) {
+  return tableName === MM_JOB_POSITION_TABLE ? "mm_job_position（岗位）" : tableName;
+}
+
 const userForm = reactive({
   registerPhone: "",
   registerPassword: "",
@@ -356,6 +503,13 @@ function resetTransientDrafts() {
   mockJobProfile.location = "";
   mockJobProfile.jdText = "";
   mockInterviewRounds.splice(0, mockInterviewRounds.length);
+  mockUiPhase.value = "list";
+  selectedMockRecordId.value = "";
+  lastMockSessionMeta.value = {};
+  realUiPhase.value = "list";
+  selectedRealRecordId.value = "";
+  lastRealSessionMeta.value = {};
+  createInterviewSessionModalOpen.value = false;
 }
 
 function mergeJobFormIntoProfile(profile) {
@@ -364,70 +518,121 @@ function mergeJobFormIntoProfile(profile) {
   profile.location = profile.location || jobForm.location || "";
 }
 
-function hydrateInterviewFromLatestReal() {
-  realInterviewRounds.splice(0, realInterviewRounds.length);
-  const latestReal = interviews.value.find((x) => x.type === "real");
-  const raw = latestReal?.summary || "";
-  const parsed = parseInterviewPayload(raw);
+function applyParsedInterviewToEditor(jobProfile, rounds, metaRef, parsed) {
+  rounds.splice(0, rounds.length);
+  metaRef.value = {};
   if (parsed.kind === "v3") {
-    Object.assign(realJobProfile, parsed.jobProfile);
-    parsed.rounds.forEach((r) => realInterviewRounds.push({ ...r, interviewers: r.interviewers.map((x) => ({ ...x })) }));
+    Object.assign(jobProfile, parsed.jobProfile);
+    metaRef.value = { ...(parsed.meta || {}) };
+    (parsed.rounds || []).forEach((r) =>
+      rounds.push({
+        ...r,
+        interviewers: (r.interviewers || []).map((x) => ({ ...x })),
+        questions: (r.questions || []).map((q) => ({ ...q }))
+      })
+    );
   } else if (parsed.kind === "v2" && parsed.v2) {
     const migrated = migrateV2ToV3(parsed.v2);
-    Object.assign(realJobProfile, migrated.jobProfile);
-    mergeJobFormIntoProfile(realJobProfile);
+    Object.assign(jobProfile, migrated.jobProfile);
+    mergeJobFormIntoProfile(jobProfile);
+    metaRef.value = { ...(migrated.meta || {}) };
     migrated.rounds.forEach((r) =>
-      realInterviewRounds.push({
+      rounds.push({
         ...r,
-        interviewers: r.interviewers.map((x) => ({ ...x })),
-        questions: r.questions.map((q) => ({ ...q }))
+        interviewers: (r.interviewers || []).map((x) => ({ ...x })),
+        questions: (r.questions || []).map((q) => ({ ...q }))
       })
     );
   } else {
-    Object.assign(realJobProfile, { title: "", company: "", location: "", jdText: "" });
-    mergeJobFormIntoProfile(realJobProfile);
+    Object.assign(jobProfile, { title: "", company: "", location: "", jdText: "" });
+    mergeJobFormIntoProfile(jobProfile);
     if (parsed.kind === "plain" && parsed.text) {
       const r0 = defaultRound(0);
       r0.resultComment = String(parsed.text).slice(0, 2000);
-      realInterviewRounds.push(r0);
+      rounds.push(r0);
     }
   }
-  if (!realInterviewRounds.length) {
-    realInterviewRounds.push(defaultRound(0));
+  if (!rounds.length) {
+    rounds.push(defaultRound(0));
+  }
+  ensureRoundsCoverVideoRoundIndex(rounds, metaRef.value?.videoInterviewMeta?.roundIndex);
+  finalizeInterviewRoundsAfterLoad(metaRef, rounds);
+}
+
+function hydrateRealInterviewFromRecord(row) {
+  selectedRealRecordId.value = row?.recordId || "";
+  const parsed = parseInterviewPayload(row?.summary || "");
+  applyParsedInterviewToEditor(realJobProfile, realInterviewRounds, lastRealSessionMeta, parsed);
+  const apiPid = row?.positionId != null && String(row.positionId).trim() !== "" ? String(row.positionId).trim() : "";
+  if (apiPid) {
+    lastRealSessionMeta.value = { ...lastRealSessionMeta.value, positionId: apiPid };
+  }
+  scheduleHydrateVideoTurnsFromSummaryMeta(realInterviewRounds, lastRealSessionMeta);
+}
+
+function hydrateMockInterviewFromRecord(row) {
+  selectedMockRecordId.value = row?.recordId || "";
+  const parsed = parseInterviewPayload(row?.summary || "");
+  applyParsedInterviewToEditor(mockJobProfile, mockInterviewRounds, lastMockSessionMeta, parsed);
+  const apiPid = row?.positionId != null && String(row.positionId).trim() !== "" ? String(row.positionId).trim() : "";
+  if (apiPid) {
+    lastMockSessionMeta.value = { ...lastMockSessionMeta.value, positionId: apiPid };
+  }
+  scheduleHydrateVideoTurnsFromSummaryMeta(mockInterviewRounds, lastMockSessionMeta);
+}
+
+/** 详情页：summary.meta.videoInterviewMeta 含 sessionId 时，从 Consumer 拉逐轮并入对应轮「面试复盘」 */
+function scheduleHydrateVideoTurnsFromSummaryMeta(rounds, metaRef) {
+  const vi = metaRef.value?.videoInterviewMeta;
+  const sid = String(vi?.sessionId ?? "").trim();
+  if (!sid) {
+    return;
+  }
+  void mergeVideoTurnsFromStoredSessionMeta(rounds, vi);
+}
+
+async function mergeVideoTurnsFromStoredSessionMeta(rounds, viMeta) {
+  const sessionId = String(viMeta?.sessionId ?? "").trim();
+  if (!sessionId) {
+    return;
+  }
+  const ri = Number(viMeta?.roundIndex);
+  const roundIndex = Number.isFinite(ri) && ri >= 0 ? Math.floor(ri) : 0;
+  ensureRoundsCoverVideoRoundIndex(rounds, roundIndex);
+  const round = rounds[roundIndex];
+  if (!round) {
+    return;
+  }
+  try {
+    const turns = await listVideoInterviewTurns(sessionId);
+    mergeVideoTurnsIntoRound(round, turns, sessionId);
+  } catch (e) {
+    console.warn("从 Consumer 拉取语音逐轮记录失败", e);
   }
 }
 
-function hydrateMockFromLatestMock() {
-  mockInterviewRounds.splice(0, mockInterviewRounds.length);
-  const latestMock = interviews.value.find((x) => x.type === "mock");
-  const raw = latestMock?.summary || "";
-  const parsed = parseInterviewPayload(raw);
-  if (parsed.kind === "v3") {
-    Object.assign(mockJobProfile, parsed.jobProfile);
-    parsed.rounds.forEach((r) => mockInterviewRounds.push({ ...r, interviewers: r.interviewers.map((x) => ({ ...x })) }));
-  } else if (parsed.kind === "v2" && parsed.v2) {
-    const migrated = migrateV2ToV3(parsed.v2);
-    Object.assign(mockJobProfile, migrated.jobProfile);
-    mergeJobFormIntoProfile(mockJobProfile);
-    migrated.rounds.forEach((r) =>
-      mockInterviewRounds.push({
-        ...r,
-        interviewers: r.interviewers.map((x) => ({ ...x })),
-        questions: r.questions.map((q) => ({ ...q }))
-      })
-    );
-  } else {
-    Object.assign(mockJobProfile, { title: "", company: "", location: "", jdText: "" });
-    mergeJobFormIntoProfile(mockJobProfile);
-    if (parsed.kind === "plain" && parsed.text) {
-      const r0 = defaultRound(0);
-      r0.resultComment = String(parsed.text).slice(0, 2000);
-      mockInterviewRounds.push(r0);
-    }
+function interviewSessionCardTitle(row) {
+  const pid = row?.positionId != null && String(row.positionId).trim() !== "" ? String(row.positionId).trim() : "";
+  if (pid) {
+    const j = jobs.value.find((x) => String(x.positionId) === pid);
+    const lab = j ? jobBindLabel(j) : "";
+    if (lab) return lab;
   }
-  if (!mockInterviewRounds.length) {
-    mockInterviewRounds.push(defaultRound(0));
-  }
+  const p = parseInterviewPayload(row?.summary || "");
+  const t = p.kind === "v3" ? String(p.jobProfile?.title || "").trim() : "";
+  if (t) return t;
+  const cat = interviewRowCategory(row);
+  if (cat === "mock") return "模拟面试";
+  if (cat === "real") return "正式面试";
+  return "面试会话";
+}
+
+function interviewSessionCardSubtitle(row) {
+  const raw = row?.createdAt;
+  if (!raw) return String(row?.recordId || "").slice(0, 12) || "—";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `创建 ${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function resetInterviewDraft() {
@@ -435,6 +640,7 @@ function resetInterviewDraft() {
   interviewDraft.timeText = "";
   interviewDraft.locationMode = "线上";
   interviewDraft.category = "技术面";
+  interviewDraft.interviewerStyleKey = "builtin_general";
   interviewDraft.interviewers = [{ role: "HR", name: "" }];
 }
 
@@ -470,6 +676,7 @@ function openEditInterviewModal(forMock, roundIndex) {
   interviewDraft.timeText = r.timeText || "";
   interviewDraft.locationMode = r.locationMode || "线上";
   interviewDraft.category = r.category || "技术面";
+  interviewDraft.interviewerStyleKey = r.interviewerStyleKey || "builtin_general";
   interviewDraft.interviewers =
     (r.interviewers && r.interviewers.length ? r.interviewers : [{ role: "HR", name: "" }]).map((x) => ({
       role: x.role || "HR",
@@ -496,9 +703,14 @@ function submitInterviewModal() {
   row.timeText = interviewDraft.timeText || "";
   row.locationMode = interviewDraft.locationMode || "线上";
   row.category = interviewDraft.category || "技术面";
+  row.interviewerStyleKey = interviewDraft.interviewerStyleKey || "builtin_general";
   row.interviewers = interviewDraft.interviewers
-    .map((x) => ({ role: x.role || "HR", name: (x.name || "").trim() }))
-    .filter((x) => x.name);
+    .map((x) => ({
+      role: String(x.role || "").trim(),
+      name: String(x.name || "").trim()
+    }))
+    .filter((x) => x.role || x.name)
+    .map((x) => ({ role: x.role || "HR", name: x.name }));
   if (!row.interviewers.length) {
     row.interviewers = [{ role: "HR", name: "未设置" }];
   }
@@ -508,6 +720,7 @@ function submitInterviewModal() {
     row.questions = prev.questions || [];
     row.resultUi = prev.resultUi;
     row.resultComment = prev.resultComment;
+    row.interviewConclusion = normalizeInterviewConclusion(prev.interviewConclusion);
     rounds.splice(editingRoundIndex.value, 1, row);
   } else {
     rounds.push(row);
@@ -516,7 +729,7 @@ function submitInterviewModal() {
 }
 
 function addInterviewerRow() {
-  interviewDraft.interviewers.push({ role: "P", name: "" });
+  interviewDraft.interviewers.push({ role: "peer", name: "" });
 }
 
 function removeInterviewerRow(index) {
@@ -525,6 +738,154 @@ function removeInterviewerRow(index) {
     return;
   }
   interviewDraft.interviewers.splice(index, 1);
+}
+
+/** 开始语音模拟面试：创建会话并进入全屏面试间（WebSocket + 麦克风转写 + 事件时间线；不采集视频） */
+async function handleStartVideoInterview(forMock, roundIndex) {
+  const rounds = forMock ? mockInterviewRounds : realInterviewRounds;
+  const r = rounds[roundIndex];
+  if (!r) return;
+  const recordId = forMock ? selectedMockRecordId.value : selectedRealRecordId.value;
+  if (!recordId) {
+    alert("请先选择或保存一条面试记录（左侧列表）。");
+    return;
+  }
+  if (!currentSpaceId.value) {
+    alert("请先选择工作空间。");
+    return;
+  }
+  try {
+    const created = await createVideoInterviewSession(recordId, {
+      spaceId: currentSpaceId.value,
+      roundIndex,
+      interviewerStyleKey: r.interviewerStyleKey || "",
+      interviewers: (r.interviewers || []).map((x) => ({
+        role: String(x.role || "").trim() || "HR",
+        name: String(x.name || "").trim()
+      }))
+    });
+    videoInterviewSessionPayload.value = created;
+    videoInterviewRoomContext.value = {
+      forMock,
+      roundIndex,
+      roundTitle: (r.roundTitle || "").trim(),
+      interviewerStyleKey: r.interviewerStyleKey || ""
+    };
+    videoInterviewRoomOpen.value = true;
+  } catch (e) {
+    showToast(`创建视频会话失败：${e?.message || e}`, "error");
+  }
+}
+
+async function closeVideoInterviewRoom() {
+  const session = videoInterviewSessionPayload.value;
+  const ctx = { ...videoInterviewRoomContext.value };
+  videoInterviewRoomOpen.value = false;
+  videoInterviewSessionPayload.value = null;
+
+  const recordId = session?.businessRecordId ?? session?.recordId;
+  const forMock = ctx.forMock !== false;
+
+  if (!currentSpaceId.value || !recordId) {
+    return;
+  }
+
+  try {
+    interviews.value = await listInterview(currentSpaceId.value);
+    const row = interviews.value.find((x) => String(x.recordId) === String(recordId));
+    if (row) {
+      if (forMock && String(selectedMockRecordId.value) === String(recordId)) {
+        hydrateMockInterviewFromRecord(row);
+      } else if (!forMock && String(selectedRealRecordId.value) === String(recordId)) {
+        hydrateRealInterviewFromRecord(row);
+      }
+    }
+  } catch (e) {
+    showToast(`刷新面试记录失败：${e?.message || e}`, "warning");
+  }
+}
+
+/** 按题目列表中「首次出现」的语音会话顺序分配场次号（1-based）；在移除本场旧题目前调用。 */
+function buildVideoSessionOrdinalMap(questions, sessionIdBeingMerged) {
+  const ids = [];
+  const seen = new Set();
+  for (const q of questions || []) {
+    if (q?.source !== "video_turn") continue;
+    const sid = String(q?.videoSessionId || "").trim();
+    if (!sid || seen.has(sid)) continue;
+    seen.add(sid);
+    ids.push(sid);
+  }
+  const cur = String(sessionIdBeingMerged || "").trim();
+  if (cur && !seen.has(cur)) {
+    ids.push(cur);
+  }
+  const m = new Map();
+  ids.forEach((sid, i) => m.set(sid, i + 1));
+  return m;
+}
+
+function mergeVideoTurnsIntoRound(round, turns, sessionId) {
+  if (!round.questions) {
+    round.questions = [];
+  }
+  const ordinalMap = buildVideoSessionOrdinalMap(round.questions, sessionId);
+  const sessionOrdinal = ordinalMap.get(sessionId) || 1;
+  round.questions = round.questions.filter((q) => !(q.source === "video_turn" && q.videoSessionId === sessionId));
+  const list = Array.isArray(turns) ? [...turns] : [];
+  list.sort((a, b) => (Number(a.turnIndex) || 0) - (Number(b.turnIndex) || 0));
+  const merged = [];
+  for (const t of list) {
+    const qt = String(t.questionText ?? "").trim();
+    const at = String(t.answerText ?? "").trim();
+    const sa = String(t.standardAnswer ?? "").trim();
+    const ev = t.evaluationJson;
+    if (!qt && !at && !sa && !(typeof ev === "string" && ev.trim())) {
+      continue;
+    }
+    merged.push(t);
+  }
+  for (let ord = 0; ord < merged.length; ord++) {
+    const t = merged[ord];
+    const qt = String(t.questionText ?? "").trim();
+    const at = String(t.answerText ?? "").trim();
+    const sa = String(t.standardAnswer ?? "").trim();
+    const ev = t.evaluationJson;
+    let pros = "";
+    let cons = "";
+    let improvementPlan = "";
+    if (typeof ev === "string" && ev.trim()) {
+      try {
+        const j = JSON.parse(ev);
+        pros = String(j.pros ?? j.strengths ?? "").trim();
+        cons = String(j.cons ?? j.weaknesses ?? "").trim();
+        improvementPlan = String(j.improvementPlan ?? j.suggestions ?? "").trim();
+      } catch {
+        improvementPlan = ev.trim().slice(0, 8000);
+      }
+    }
+    const tid = String(t.turnId ?? "");
+    const displayNum = ord + 1;
+    const q = defaultQuestion(ord);
+    q.id = tid ? `vi_${tid}` : newQuestionId();
+    q.label = formatVoiceTurnQuestionLabel(displayNum, sessionOrdinal);
+    q.videoSessionOrdinal = sessionOrdinal;
+    q.title = qt ? qt.slice(0, 120) : `第 ${displayNum} 题`;
+    q.questionRecord = qt;
+    q.answerRecord = at;
+    q.standardAnswer = sa;
+    q.pros = pros;
+    q.cons = cons;
+    q.improvementPlan = improvementPlan;
+    q.source = "video_turn";
+    q.videoTurnId = tid;
+    q.videoSessionId = sessionId;
+    q.difficulty = 2;
+    q.score = extractVoiceTurnScoreFromEvaluationJson(typeof ev === "string" ? ev : "");
+    round.questions.push(q);
+  }
+  enrichVoiceTurnLabelsWhenMultiSession(round.questions);
+  syncInterviewConclusionOverallScoreFromQuestions(round);
 }
 
 function openAddQuestionModal(forMock, roundIndex) {
@@ -648,7 +1009,10 @@ function tabTitle(key) {
     recycle: "回收站",
     config: "系统设置",
     user: "用户管理",
-    "db-inspector": "库表看板"
+    "db-inspector": "库表看板",
+    "interview-style-mgmt": "面试官风格管理",
+    "interview-role-mgmt": "面试官角色管理",
+    "interview-voiceprint-mgmt": "全局声纹"
   };
   return m[key] || "";
 }
@@ -840,18 +1204,80 @@ function onPanelModalHeaderPointerDown(e) {
   document.addEventListener("pointerup", onPanelModalPointerUp, { once: true });
 }
 
-function focusRichEditor() {
-  jobRichEditorRef.value?.focus();
+function escapeHtmlForResumePlain(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** 将存储的模块正文转为可放入 contenteditable 的 HTML（旧数据纯文本会换行） */
+function resumeBodyHtmlFromStored(text) {
+  const t = text ?? "";
+  if (/<[a-z][\s\S]*>/i.test(t)) {
+    return t;
+  }
+  return escapeHtmlForResumePlain(t).replace(/\r\n|\r|\n/g, "<br>");
+}
+
+function getRichCommandEl() {
+  if (jobModalOpen.value) return jobRichEditorRef.value;
+  return resumeRichTargetRef.value;
+}
+
+function focusRichCommandTarget() {
+  getRichCommandEl()?.focus();
+}
+
+function syncActiveResumeBlockFromDom() {
+  const el = resumeRichTargetRef.value;
+  if (!el?.dataset?.resumeBlockId) return;
+  const id = el.dataset.resumeBlockId;
+  const block = resumeBlocks.find((x) => String(x.id) === String(id));
+  if (block) block.text = el.innerHTML;
+}
+
+function bindResumeBlockBodyEl(block, el) {
+  if (!el) {
+    resumeBlockBodyEls.delete(block.id);
+    return;
+  }
+  resumeBlockBodyEls.set(block.id, el);
+  const html = resumeBodyHtmlFromStored(block.text);
+  if (!el.innerHTML.trim() && html) {
+    el.innerHTML = html;
+  }
+}
+
+async function flushResumeBlockEditorsFromModel() {
+  await nextTick();
+  await nextTick();
+  resumeBlocks.forEach((b) => {
+    const el = resumeBlockBodyEls.get(b.id);
+    if (!el) return;
+    const html = resumeBodyHtmlFromStored(b.text);
+    if (el.innerHTML !== html) el.innerHTML = html;
+  });
+}
+
+function onResumeBlockBodyFocusIn(ev) {
+  resumeRichTargetRef.value = ev.currentTarget;
+}
+
+function onResumeBlockBodyInput(block, ev) {
+  block.text = ev.currentTarget.innerHTML;
 }
 
 function rtCommand(cmd, value = null) {
-  focusRichEditor();
+  focusRichCommandTarget();
   try {
     document.execCommand(cmd, false, value);
   } catch {
     /* ignore */
   }
-  jobModalMarkDirty();
+  syncActiveResumeBlockFromDom();
+  if (jobModalOpen.value) jobModalMarkDirty();
 }
 
 function rtInsertLink() {
@@ -919,19 +1345,8 @@ function formatJobDate(iso) {
 }
 
 function openImportJd() {
-  const list = activeJobsList.value.filter(
-    (j) => !currentSpaceId.value || rowSpaceIds(j).includes(String(currentSpaceId.value))
-  );
-  if (list.length === 0) {
-    showToast("请先添加岗位，再在「编辑岗位」中粘贴 JD 或使用一键拆解考点。", "info");
-    return;
-  }
-  if (list.length === 1) {
-    showToast("已打开编辑：请在「JD 详细内容」或上方拆解粘贴区粘贴完整 JD 后保存。", "info");
-    openEditJobModal(list[0]);
-    return;
-  }
-  showToast("请打开对应岗位的「编辑」，在 JD 详细内容或拆解粘贴区粘贴完整 JD 后保存。", "info");
+  openAddJobModal();
+  showToast("请在弹窗中粘贴岗位 JD，点击「一键解析岗位信息」回填后保存。", "info");
 }
 
 function requestDeleteJob(row) {
@@ -1039,6 +1454,53 @@ function jobBindLabel(row) {
   if (!row) return "";
   const parts = [row.title, row.company].filter(Boolean);
   return parts.join(" · ") || row.title || "岗位";
+}
+
+const jobsLinkedToCurrentSpace = computed(() => {
+  const sid = String(currentSpaceId.value || "");
+  if (!sid) return [];
+  return activeJobsList.value.filter((j) => rowSpaceIds(j).includes(sid));
+});
+
+const mockSessionsSorted = computed(() => {
+  const sid = String(currentSpaceId.value || "");
+  if (!sid) return [];
+  return [...(interviews.value || [])]
+    .filter((x) => interviewRowCategory(x) === "mock" && String(x.spaceId || "") === sid)
+    .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+});
+
+const realSessionsSorted = computed(() => {
+  const sid = String(currentSpaceId.value || "");
+  if (!sid) return [];
+  return [...(interviews.value || [])]
+    .filter((x) => interviewRowCategory(x) === "real" && String(x.spaceId || "") === sid)
+    .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+});
+
+/** 模拟面试详情：绑定岗位一句话（优先 API positionId / 会话 meta） */
+const mockInterviewBoundJobSummary = computed(() => {
+  const row = (interviews.value || []).find((x) => String(x.recordId) === String(selectedMockRecordId.value));
+  const pid =
+    row?.positionId != null && String(row.positionId).trim() !== ""
+      ? String(row.positionId).trim()
+      : lastMockSessionMeta.value?.positionId != null && String(lastMockSessionMeta.value.positionId).trim() !== ""
+        ? String(lastMockSessionMeta.value.positionId).trim()
+        : "";
+  if (pid) {
+    const j = jobs.value.find((x) => String(x.positionId) === String(pid));
+    if (j) return jobBindLabel(j);
+    return `岗位 ID：${String(pid)}`;
+  }
+  const t = (mockJobProfile.title || "").trim();
+  if (t) return t;
+  return "（未绑定岗位）";
+});
+
+/** 列表行类别：兼容 JSON 中 type / category 两种字段名 */
+function interviewRowCategory(row) {
+  const t = row?.type ?? row?.category;
+  return t === "mock" || t === "real" ? t : "";
 }
 
 function toggleNewSpaceBindJob(positionId) {
@@ -1171,6 +1633,7 @@ function revertResumeEditorToBaseline() {
     /* ignore */
   }
   clearUndoState();
+  void flushResumeBlockEditorsFromModel();
 }
 
 function isResumeDetailDirty() {
@@ -1239,6 +1702,8 @@ function hydrateResumeFromRow(row) {
     resumeBlocks.splice(0, resumeBlocks.length);
     resumeDraftBaseline.value = "";
     clearUndoState();
+    resumeRichTargetRef.value = null;
+    void flushResumeBlockEditorsFromModel();
     return;
   }
   selectedResumeId.value = String(row.resumeId);
@@ -1262,6 +1727,7 @@ function hydrateResumeFromRow(row) {
   }
   resumeDraftBaseline.value = serializeResumeDraft();
   clearUndoState();
+  void flushResumeBlockEditorsFromModel();
 }
 
 function resumeUpdatedLabel(row) {
@@ -1305,6 +1771,40 @@ async function backToResumeList() {
   await loadSpaceData();
 }
 
+async function exportResumePdfFromRow(row) {
+  if (!row?.resumeId || resumeExportingId.value) return;
+  resumeExportingId.value = String(row.resumeId);
+  try {
+    const doc = await getResumeDocumentById(row.resumeId);
+    await exportResumeDocumentToPdf({
+      name: doc.name,
+      modules: doc.modules
+    });
+    showToast("PDF 已生成并开始下载", "success");
+  } catch (e) {
+    showToast(e?.message || "导出失败", "error");
+  } finally {
+    resumeExportingId.value = "";
+  }
+}
+
+async function exportCurrentResumeDetailPdf() {
+  if (!selectedResumeId.value || resumeExportingId.value) return;
+  resumeExportingId.value = String(selectedResumeId.value);
+  try {
+    const data = JSON.parse(serializeResumeDraft());
+    await exportResumeDocumentToPdf({
+      name: data.name,
+      modules: data.modules
+    });
+    showToast("PDF 已生成并开始下载", "success");
+  } catch (e) {
+    showToast(e?.message || "导出失败", "error");
+  } finally {
+    resumeExportingId.value = "";
+  }
+}
+
 async function confirmDeleteResumeDoc(row, ev) {
   ev?.stopPropagation?.();
   if (!row?.resumeId) return;
@@ -1339,10 +1839,22 @@ function resumeModuleCount(row) {
   return t.split("\n\n").filter((c) => c.trim()).length;
 }
 
+function resumePlainPreviewFromHtml(html) {
+  const raw = String(html ?? "").trim();
+  if (!raw) return "";
+  if (typeof document === "undefined") {
+    return raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+  const d = document.createElement("div");
+  d.innerHTML = raw;
+  return (d.textContent || "").replace(/\s+/g, " ").trim();
+}
+
 function resumeCardPreview(row) {
   if (!row) return "（暂无模块正文）";
   if (Array.isArray(row.modules) && row.modules.length > 0) {
-    const t = (row.modules.map((m) => (m.text || "").trim()).find(Boolean) || "").replace(/\s+/g, " ").trim();
+    const t =
+      row.modules.map((m) => resumePlainPreviewFromHtml(m.text)).find((x) => x.length > 0) || "";
     if (!t) return "（暂无模块正文）";
     return t.length > 96 ? `${t.slice(0, 96)}…` : t;
   }
@@ -1571,6 +2083,7 @@ async function registerUser() {
     userForm.registerConfirmPassword = "";
     try {
       await refreshSpaces();
+      await loadSpaceData();
     } catch (e) {
       alert(`账号已创建，但加载空间列表失败：${e?.message || e}\n请确认 business 已重启且会话鉴权与库表一致。`);
       return;
@@ -1605,6 +2118,7 @@ async function loginUser() {
     userForm.loginPassword = "";
     try {
       await refreshSpaces();
+      await loadSpaceData();
     } catch (e) {
       alert(`已登录，但加载空间列表失败：${e?.message || e}`);
       return;
@@ -1732,6 +2246,22 @@ function extractAnthropicAssistantText(data) {
   return blocks.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("");
 }
 
+/** 避免将模型网关误填为 Vite 等前端 dev 地址，导致对 localhost:5173/chat/completions 等路径产生大量失败请求 */
+function assertLlmInvokeUrlNotSameOriginAsPage(invokeUrl) {
+  if (typeof window === "undefined") return;
+  let parsed;
+  try {
+    parsed = new URL(invokeUrl);
+  } catch {
+    return;
+  }
+  if (parsed.origin === window.location.origin) {
+    throw new Error(
+      "模型 Base URL 不能与当前页面同源（例如不要填 http://localhost:5173）。请改为百炼或真实网关的 HTTPS 地址。"
+    );
+  }
+}
+
 function ensureBailianConfigReady() {
   const { mode, url: invokeUrl } = resolveBailianInvoke(modelConfig.baseUrl);
   const apiKey = modelConfig.apiKey.trim();
@@ -1739,10 +2269,13 @@ function ensureBailianConfigReady() {
   if (!invokeUrl || !apiKey || !modelName) {
     throw new Error("请先在系统设置中完整填写 Base URL / API 密钥 / 模型名称");
   }
+  assertLlmInvokeUrlNotSameOriginAsPage(invokeUrl);
   return { invokeUrl, mode, apiKey, modelName };
 }
 
-async function callBailianChat(userPrompt) {
+async function callBailianChat(userPrompt, opts = {}) {
+  const maxTokens =
+    typeof opts.maxTokens === "number" && opts.maxTokens > 0 ? Math.min(opts.maxTokens, 32000) : 1024;
   const { invokeUrl, mode, apiKey, modelName } = ensureBailianConfigReady();
   /** 百炼文档：x-api-key 与 Authorization: Bearer 二选一；Coding Plan 的 sk-* 密钥在浏览器侧与 Bearer 更一致 */
   const headers =
@@ -1761,13 +2294,14 @@ async function callBailianChat(userPrompt) {
     mode === "anthropic"
       ? JSON.stringify({
           model: modelName,
-          max_tokens: 1024,
+          max_tokens: maxTokens,
           stream: false,
           messages: [{ role: "user", content: userPrompt }],
           thinking: { type: "disabled" }
         })
       : JSON.stringify({
           model: modelName,
+          max_tokens: maxTokens,
           stream: false,
           messages: [{ role: "user", content: userPrompt }]
         });
@@ -1925,7 +2459,8 @@ async function testBailianConfigConnection() {
   }
 }
 
-async function loadAggregatedResumes() {
+async function loadAggregatedResumes(opts = {}) {
+  const skipResumeDetailRefresh = !!opts.skipResumeDetailRefresh;
   if (!currentUser.value) {
     resumes.value = [];
     return;
@@ -1936,7 +2471,11 @@ async function loadAggregatedResumes() {
   } catch {
     resumes.value = [];
   }
-  if (resumeUiPhase.value === "detail" && selectedResumeId.value) {
+  if (
+    !skipResumeDetailRefresh &&
+    resumeUiPhase.value === "detail" &&
+    selectedResumeId.value
+  ) {
     const exists = resumes.value.some((r) => String(r.resumeId) === String(selectedResumeId.value));
     if (!exists) {
       showToast("当前简历已不存在或已被删除", "warning");
@@ -1966,6 +2505,189 @@ async function loadAggregatedJobs() {
     jobs.value = [];
   }
   syncJobFormFromFirstJob();
+}
+
+async function loadInterviewerStyles() {
+  if (!currentUser.value) {
+    interviewerCustomStyles.value = [];
+    return;
+  }
+  try {
+    interviewerCustomStyles.value = await listInterviewerStyles();
+  } catch {
+    interviewerCustomStyles.value = [];
+    showToast("加载自定义面试官风格失败", "error");
+  }
+}
+
+async function loadInterviewerRoles() {
+  if (!currentUser.value) {
+    interviewerRoleCatalog.value = [];
+    return;
+  }
+  try {
+    interviewerRoleCatalog.value = await listInterviewerRoles();
+  } catch {
+    interviewerRoleCatalog.value = [];
+    showToast("加载面试官角色失败", "error");
+  }
+}
+
+function openStyleEditorCreate() {
+  resetPanelModalDrag();
+  styleEditorMode.value = "create";
+  styleEditorId.value = "";
+  styleEditorTitle.value = "";
+  styleEditorPrompt.value = CUSTOM_INTERVIEWER_STYLE_TEMPLATE;
+  styleEditorOpen.value = true;
+}
+
+function openStyleEditorEdit(row) {
+  if (!row?.styleId) return;
+  resetPanelModalDrag();
+  styleEditorMode.value = "edit";
+  styleEditorId.value = String(row.styleId);
+  styleEditorTitle.value = row.title || "";
+  styleEditorPrompt.value = row.promptBody || "";
+  styleEditorOpen.value = true;
+}
+
+function closeStyleEditor() {
+  resetPanelModalDrag();
+  styleEditorOpen.value = false;
+}
+
+function applyInterviewerStyleTemplate() {
+  styleEditorPrompt.value = CUSTOM_INTERVIEWER_STYLE_TEMPLATE;
+  showToast("已填入模版，请按需修改", "info");
+}
+
+async function submitStyleEditor() {
+  const title = (styleEditorTitle.value || "").trim();
+  const body = (styleEditorPrompt.value || "").trim();
+  if (!title || !body) {
+    showToast("请填写名称与 Prompt 正文", "warning");
+    return;
+  }
+  if (styleEditorSaving.value) return;
+  styleEditorSaving.value = true;
+  try {
+    if (styleEditorMode.value === "edit" && styleEditorId.value) {
+      await updateInterviewerStyle(styleEditorId.value, { title, promptBody: body });
+      showToast("已保存", "success");
+    } else {
+      await createInterviewerStyle({ title, promptBody: body });
+      showToast("已创建", "success");
+    }
+    await loadInterviewerStyles();
+    closeStyleEditor();
+  } catch (e) {
+    showToast(e?.message || "保存失败", "error");
+  } finally {
+    styleEditorSaving.value = false;
+  }
+}
+
+async function removeInterviewerStyleRow(row) {
+  if (!row?.styleId) return;
+  if (!confirm(`确定删除风格「${row.title || row.styleId}」？`)) return;
+  try {
+    await deleteInterviewerStyle(row.styleId);
+    showToast("已删除", "success");
+    await loadInterviewerStyles();
+  } catch (e) {
+    showToast(e?.message || "删除失败", "error");
+  }
+}
+
+function openRoleEditorCreate() {
+  resetPanelModalDrag();
+  closeBuiltinRoleDetail();
+  roleEditorMode.value = "create";
+  roleEditorId.value = "";
+  roleEditorRoleCode.value = "";
+  roleEditorRoleName.value = "";
+  roleEditorInterviewContent.value = "";
+  roleEditorFocusPoints.value = "";
+  roleEditorEvaluationHint.value = "";
+  roleEditorOpen.value = true;
+}
+
+function openRoleEditorEdit(row) {
+  if (!row?.roleId) return;
+  resetPanelModalDrag();
+  closeBuiltinRoleDetail();
+  roleEditorMode.value = "edit";
+  roleEditorId.value = String(row.roleId);
+  roleEditorRoleCode.value = row.roleCode || "";
+  roleEditorRoleName.value = row.roleName || "";
+  roleEditorInterviewContent.value = row.interviewContent || "";
+  roleEditorFocusPoints.value = row.focusPoints || "";
+  roleEditorEvaluationHint.value = row.evaluationHint || "";
+  roleEditorOpen.value = true;
+}
+
+function closeRoleEditor() {
+  resetPanelModalDrag();
+  roleEditorOpen.value = false;
+}
+
+function openBuiltinRoleDetail(p) {
+  if (!p?.code) return;
+  resetPanelModalDrag();
+  if (roleEditorOpen.value) {
+    closeRoleEditor();
+  }
+  builtinRoleDetail.value = p;
+  builtinRoleDetailOpen.value = true;
+}
+
+function closeBuiltinRoleDetail() {
+  resetPanelModalDrag();
+  builtinRoleDetailOpen.value = false;
+  builtinRoleDetail.value = null;
+}
+
+async function submitRoleEditor() {
+  const roleCode = (roleEditorRoleCode.value || "").trim();
+  const roleName = (roleEditorRoleName.value || "").trim();
+  const interviewContent = (roleEditorInterviewContent.value || "").trim();
+  const focusPoints = (roleEditorFocusPoints.value || "").trim();
+  const evaluationHint = (roleEditorEvaluationHint.value || "").trim();
+  if (!roleCode || !roleName || !interviewContent || !focusPoints) {
+    showToast("请填写角色代号、名称、面试内容与侧重点", "warning");
+    return;
+  }
+  if (roleEditorSaving.value) return;
+  roleEditorSaving.value = true;
+  try {
+    const payload = { roleCode, roleName, interviewContent, focusPoints, evaluationHint };
+    if (roleEditorMode.value === "edit" && roleEditorId.value) {
+      await updateInterviewerRole(roleEditorId.value, payload);
+      showToast("已保存", "success");
+    } else {
+      await createInterviewerRole(payload);
+      showToast("已创建", "success");
+    }
+    await loadInterviewerRoles();
+    closeRoleEditor();
+  } catch (e) {
+    showToast(e?.message || "保存失败", "error");
+  } finally {
+    roleEditorSaving.value = false;
+  }
+}
+
+async function removeInterviewerRoleRow(row) {
+  if (!row?.roleId) return;
+  if (!confirm(`确定删除角色「${row.roleName || row.roleCode || row.roleId}」？`)) return;
+  try {
+    await deleteInterviewerRole(row.roleId);
+    showToast("已删除", "success");
+    await loadInterviewerRoles();
+  } catch (e) {
+    showToast(e?.message || "删除失败", "error");
+  }
 }
 
 async function loadSpaceManagementOverview() {
@@ -2270,6 +2992,14 @@ async function loadSpaceData() {
     await loadDbInspectorTables();
     return;
   }
+  if (activeTab.value === "interview-style-mgmt") {
+    await loadInterviewerStyles();
+    return;
+  }
+  if (activeTab.value === "interview-role-mgmt") {
+    await loadInterviewerRoles();
+    return;
+  }
   if (activeTab.value === "recycle") {
     recycleBinSpaces.value = await listRecycleBinSpaces();
     return;
@@ -2325,13 +3055,27 @@ async function loadSpaceData() {
   if (activeTab.value === "mock" || activeTab.value === "interview") {
     interviews.value = await listInterview(currentSpaceId.value);
     await loadAggregatedJobs();
+    await loadInterviewerStyles();
+    await loadInterviewerRoles();
     if (activeTab.value === "interview") {
-      hydrateInterviewFromLatestReal();
-      mergeJobFormIntoProfile(realJobProfile);
+      if (realUiPhase.value === "detail" && selectedRealRecordId.value) {
+        const row = interviews.value.find((x) => String(x.recordId) === String(selectedRealRecordId.value));
+        if (row) hydrateRealInterviewFromRecord(row);
+        else {
+          realUiPhase.value = "list";
+          selectedRealRecordId.value = "";
+        }
+      }
     }
     if (activeTab.value === "mock") {
-      hydrateMockFromLatestMock();
-      mergeJobFormIntoProfile(mockJobProfile);
+      if (mockUiPhase.value === "detail" && selectedMockRecordId.value) {
+        const row = interviews.value.find((x) => String(x.recordId) === String(selectedMockRecordId.value));
+        if (row) hydrateMockInterviewFromRecord(row);
+        else {
+          mockUiPhase.value = "list";
+          selectedMockRecordId.value = "";
+        }
+      }
     }
   }
 }
@@ -2342,21 +3086,16 @@ async function saveResume() {
   const spaceId = pickLinkedSpaceIdForApi(row);
   resumeSaveLoading.value = true;
   try {
-    const body = JSON.parse(serializeResumeDraft());
+    const body = compressResumePayload(JSON.parse(serializeResumeDraft()));
     if (spaceId) {
       await updateResumeDocument(spaceId, row.resumeId, body);
     } else {
       await updateResumeDocumentById(row.resumeId, body);
     }
-    await loadAggregatedResumes();
-    const refreshed = (Array.isArray(resumes.value) ? resumes.value : []).find(
-      (r) => String(r.resumeId) === String(selectedResumeId.value)
-    );
-    if (refreshed) {
-      hydrateResumeFromRow(refreshed);
-    } else {
-      resumeDraftBaseline.value = serializeResumeDraft();
-    }
+    await loadAggregatedResumes({ skipResumeDetailRefresh: true });
+    const doc = await getResumeDocumentById(selectedResumeId.value);
+    hydrateResumeFromRow(doc);
+    resumeDraftBaseline.value = serializeResumeDraft();
     if (showAddSpaceModal.value) {
       await loadBindSourceResources();
     }
@@ -2395,6 +3134,7 @@ function addResumeBlock() {
   const title = newResumeBlockTitle.value.trim() || `自定义模块${resumeBlocks.length + 1}`;
   resumeBlocks.push({ id: newResumeBlockId(), title, text: "" });
   newResumeBlockTitle.value = "";
+  void flushResumeBlockEditorsFromModel();
 }
 
 function normalizeResumeBlockTitle(block, index) {
@@ -2421,6 +3161,7 @@ function undoRemoveResumeBlock() {
   const insertIndex = Math.min(deletedBlockBackupIndex.value, resumeBlocks.length);
   resumeBlocks.splice(insertIndex, 0, deletedBlockBackup.value);
   clearUndoState();
+  void flushResumeBlockEditorsFromModel();
 }
 
 function startUndoCountdown() {
@@ -2519,76 +3260,261 @@ function onAnswerDrop(targetIndex) {
   draggingAnswerIndex.value = -1;
 }
 
-async function runJobModalAnalyzeFocusPoints() {
+async function runJobModalParseJdFull() {
   if (!jobModalJdPaste.value.trim()) {
-    alert("请先在「粘贴完整 JD」中填写内容后再拆解");
+    alert("请先在「岗位信息（JD 描述）」中粘贴完整 JD 后再解析");
     return;
   }
   if (jobModalJdAnalyzing.value) return;
   jobModalJdAnalyzing.value = true;
   try {
-    const prompt = [
-      "你是面试官助手。请对下面JD做考点拆解。",
-      "输出要求：仅输出一行逗号分隔的考点关键词，不要额外解释。",
-      `JD内容：${jobModalJdPaste.value}`
-    ].join("\n");
-    const answer = await callBailianChat(prompt);
-    jobModalDraft.focusPoints = (answer || "").trim();
-    jobModalMarkDirty();
-    showToast("考点已写入「考点关键词」，保存岗位后生效", "success");
+    const jd = jobModalJdPaste.value.trim();
+    const o = await parseJobPositionJd(jd);
+    applyJobModalParseApiResponse(o, jd);
+    showToast("解析完成，已回填各字段（考点、描述与 JD 正文将随保存写入）", "success");
   } catch (e) {
-    alert(e?.message || "百炼调用失败");
+    alert(e?.message || "解析失败");
   } finally {
     jobModalJdAnalyzing.value = false;
   }
 }
 
-async function saveMock() {
-  if (!currentSpaceId.value) return;
-  Object.assign(jobForm, {
-    title: mockJobProfile.title || jobForm.title,
-    company: mockJobProfile.company || jobForm.company,
-    location: mockJobProfile.location || jobForm.location
-  });
-  await upsertPrimaryJobFromForm();
-  const roundNum = Math.max(1, mockInterviewRounds.length);
-  const summary = serializeV3(mockJobProfile, mockInterviewRounds, {});
-  await createInterview("mock", {
-    spaceId: currentSpaceId.value,
-    round: roundNum,
-    interviewType: firstRoundInterviewType(mockInterviewRounds),
-    score: averageQuestionScore(mockInterviewRounds),
-    summary,
-    result: aggregateRoundResults(mockInterviewRounds)
-  });
-  interviews.value = await listInterview(currentSpaceId.value);
-  hydrateMockFromLatestMock();
+/** @param jdPlain 有值时作为 JD 正文转 HTML 的源文本（粘贴解析）；图片解析传 null，用 description+考点 拼装 */
+function applyJobModalParseApiResponse(o, jdPlain) {
+  jobModalDraft.title = String(o.title ?? "").trim();
+  jobModalDraft.company = String(o.company ?? "").trim();
+  jobModalDraft.location = String(o.location ?? "").trim();
+  jobModalDraft.jobType = o.jobType === "campus" || o.jobType === "intern" ? o.jobType : "fulltime";
+  jobModalDraft.salary = String(o.salary ?? "").trim();
+  jobModalDraft.focusPoints = String(o.focusPoints ?? "").trim();
+  jobModalDraft.description = String(o.description ?? "").trim();
+  const plainFromJd = jdPlain != null && String(jdPlain).trim() ? String(jdPlain).trim() : "";
+  const plainFallback = [jobModalDraft.description, jobModalDraft.focusPoints]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+  const plain = plainFromJd || plainFallback || "（由图片解析生成，可在编辑模式补充 JD 正文）";
+  jobModalDraft.jdDetail = jdPlainToSimpleHtml(plain);
+  if (jobModalMode.value === "edit") {
+    nextTick(() => {
+      if (jobRichEditorRef.value) {
+        jobRichEditorRef.value.innerHTML = jobModalDraft.jdDetail || "";
+      }
+    });
+  }
+  jobModalMarkDirty();
 }
 
-async function saveInterview() {
+function openJobModalJdImagePicker() {
+  jobModalJdImageInputRef.value?.click();
+}
+
+async function onJobModalJdImageSelected(ev) {
+  const input = ev.target;
+  const file = input?.files?.[0];
+  if (input) input.value = "";
+  if (!file) return;
+  if (jobModalJdAnalyzing.value) return;
+  jobModalJdAnalyzing.value = true;
+  try {
+    const o = await parseJobPositionFromImage(file);
+    applyJobModalParseApiResponse(o, null);
+    showToast("图片解析完成，已回填各字段；请确认 Base URL 为 compatible-mode 且模型支持图片（如 qwen3.5-plus，以控制台为准）", "success");
+  } catch (e) {
+    alert(e?.message || "图片解析失败");
+  } finally {
+    jobModalJdAnalyzing.value = false;
+  }
+}
+
+function openCreateMockInterviewModal() {
+  if (!currentSpaceId.value) {
+    showToast("请先选择工作空间", "warning");
+    return;
+  }
+  if (!jobsLinkedToCurrentSpace.value.length) {
+    showToast("请先在「岗位管理」为本空间绑定或创建岗位", "warning");
+    return;
+  }
+  createInterviewSessionKind.value = "mock";
+  createInterviewSessionJobId.value = String(jobsLinkedToCurrentSpace.value[0].positionId || "");
+  createInterviewSessionModalOpen.value = true;
+}
+
+function openCreateRealInterviewModal() {
+  if (!currentSpaceId.value) {
+    showToast("请先选择工作空间", "warning");
+    return;
+  }
+  if (!jobsLinkedToCurrentSpace.value.length) {
+    showToast("请先在「岗位管理」为本空间绑定或创建岗位", "warning");
+    return;
+  }
+  createInterviewSessionKind.value = "real";
+  createInterviewSessionJobId.value = String(jobsLinkedToCurrentSpace.value[0].positionId || "");
+  createInterviewSessionModalOpen.value = true;
+}
+
+function closeCreateInterviewSessionModal() {
+  createInterviewSessionModalOpen.value = false;
+}
+
+async function submitCreateInterviewSession() {
   if (!currentSpaceId.value) return;
-  Object.assign(jobForm, {
-    title: realJobProfile.title || jobForm.title,
-    company: realJobProfile.company || jobForm.company,
-    location: realJobProfile.location || jobForm.location
-  });
-  await upsertPrimaryJobFromForm();
+  const jid = String(createInterviewSessionJobId.value || "").trim();
+  if (!jid) {
+    showToast("请选择岗位", "warning");
+    return;
+  }
+  const job = jobs.value.find((j) => String(j.positionId) === jid);
+  if (!job) {
+    showToast("岗位不存在", "warning");
+    return;
+  }
+  const d = decodeJobBaseRange(job.baseRange);
+  const jobProfile = {
+    title: job.title || "",
+    company: job.company || "",
+    location: job.location || "",
+    jdText: d.jdDetail || ""
+  };
+  const rounds = [defaultRound(0)];
+  const meta = { positionId: job.positionId };
+  const summary = serializeV3(jobProfile, rounds, meta);
+  const apiType = createInterviewSessionKind.value === "real" ? "real" : "mock";
+  try {
+    const created = await createInterview(apiType, {
+      spaceId: currentSpaceId.value,
+      round: Math.max(1, rounds.length),
+      interviewType: firstRoundInterviewType(rounds),
+      score: averageQuestionScore(rounds),
+      summary,
+      result: aggregateRoundResults(rounds),
+      positionId: job.positionId
+    });
+    interviews.value = await listInterview(currentSpaceId.value);
+    createInterviewSessionModalOpen.value = false;
+    const rid = created?.recordId;
+    const row =
+      rid != null && rid !== ""
+        ? interviews.value.find((x) => String(x.recordId) === String(rid)) || created
+        : created;
+    if (apiType === "mock") {
+      openMockInterviewSessionDetail(row);
+    } else {
+      openRealInterviewSessionDetail(row);
+    }
+    showToast("已创建面试会话", "success");
+  } catch (e) {
+    showToast(e?.message || "创建失败", "error");
+  }
+}
+
+function openMockInterviewSessionDetail(row) {
+  if (!row?.recordId) return;
+  const merged =
+    row.summary != null && String(row.summary).trim() !== ""
+      ? row
+      : interviews.value.find((x) => String(x.recordId) === String(row.recordId)) || row;
+  hydrateMockInterviewFromRecord(merged);
+  mockUiPhase.value = "detail";
+}
+
+function backToMockInterviewList() {
+  mockUiPhase.value = "list";
+  selectedMockRecordId.value = "";
+}
+
+function openRealInterviewSessionDetail(row) {
+  if (!row?.recordId) return;
+  const merged =
+    row.summary != null && String(row.summary).trim() !== ""
+      ? row
+      : interviews.value.find((x) => String(x.recordId) === String(row.recordId)) || row;
+  hydrateRealInterviewFromRecord(merged);
+  realUiPhase.value = "detail";
+}
+
+function backToRealInterviewList() {
+  realUiPhase.value = "list";
+  selectedRealRecordId.value = "";
+}
+
+async function saveMockInterviewSession() {
+  if (!currentSpaceId.value || !selectedMockRecordId.value) return;
+  prepareInterviewRoundsForPersist(mockInterviewRounds);
+  const roundNum = Math.max(1, mockInterviewRounds.length);
+  const summary = serializeV3(mockJobProfile, mockInterviewRounds, lastMockSessionMeta.value);
+  const qAvg = averageQuestionScore(mockInterviewRounds);
+  const lastMr = mockInterviewRounds[mockInterviewRounds.length - 1];
+  const oc = lastMr?.interviewConclusion;
+  const ocScore = oc != null ? Number(oc.overallScore) : NaN;
+  const score = Number.isFinite(ocScore) ? Math.min(100, Math.max(0, Math.round(ocScore))) : qAvg;
+  const boundPid =
+    lastMockSessionMeta.value?.positionId != null && String(lastMockSessionMeta.value.positionId).trim() !== ""
+      ? String(lastMockSessionMeta.value.positionId).trim()
+      : null;
+  try {
+    await updateInterview(selectedMockRecordId.value, {
+      spaceId: currentSpaceId.value,
+      round: roundNum,
+      interviewType: firstRoundInterviewType(mockInterviewRounds),
+      score,
+      summary,
+      result: aggregateRoundResults(mockInterviewRounds),
+      positionId: boundPid
+    });
+    interviews.value = await listInterview(currentSpaceId.value);
+    const row = interviews.value.find((x) => String(x.recordId) === String(selectedMockRecordId.value));
+    if (row) hydrateMockInterviewFromRecord(row);
+    showToast("已保存", "success");
+  } catch (e) {
+    showToast(e?.message || "保存失败", "error");
+  }
+}
+
+async function saveRealInterviewSession() {
+  if (!currentSpaceId.value || !selectedRealRecordId.value) return;
+  prepareInterviewRoundsForPersist(realInterviewRounds);
   const roundNum = Math.max(1, realInterviewRounds.length);
-  const summary = serializeV3(realJobProfile, realInterviewRounds, {});
-  await createInterview("real", {
-    spaceId: currentSpaceId.value,
-    round: roundNum,
-    interviewType: firstRoundInterviewType(realInterviewRounds),
-    score: averageQuestionScore(realInterviewRounds),
-    summary,
-    result: aggregateRoundResults(realInterviewRounds)
-  });
-  interviews.value = await listInterview(currentSpaceId.value);
-  hydrateInterviewFromLatestReal();
+  const summary = serializeV3(realJobProfile, realInterviewRounds, lastRealSessionMeta.value);
+  const qAvgReal = averageQuestionScore(realInterviewRounds);
+  const lastRr = realInterviewRounds[realInterviewRounds.length - 1];
+  const ocReal = lastRr?.interviewConclusion;
+  const ocScoreReal = ocReal != null ? Number(ocReal.overallScore) : NaN;
+  const scoreReal = Number.isFinite(ocScoreReal)
+    ? Math.min(100, Math.max(0, Math.round(ocScoreReal)))
+    : qAvgReal;
+  const boundPidReal =
+    lastRealSessionMeta.value?.positionId != null && String(lastRealSessionMeta.value.positionId).trim() !== ""
+      ? String(lastRealSessionMeta.value.positionId).trim()
+      : null;
+  try {
+    await updateInterview(selectedRealRecordId.value, {
+      spaceId: currentSpaceId.value,
+      round: roundNum,
+      interviewType: firstRoundInterviewType(realInterviewRounds),
+      score: scoreReal,
+      summary,
+      result: aggregateRoundResults(realInterviewRounds),
+      positionId: boundPidReal
+    });
+    interviews.value = await listInterview(currentSpaceId.value);
+    const row = interviews.value.find((x) => String(x.recordId) === String(selectedRealRecordId.value));
+    if (row) hydrateRealInterviewFromRecord(row);
+    showToast("已保存", "success");
+  } catch (e) {
+    showToast(e?.message || "保存失败", "error");
+  }
 }
 
 function onGlobalEscape(e) {
   if (e.key !== "Escape") return;
+  if (createInterviewSessionModalOpen.value) {
+    closeCreateInterviewSessionModal();
+    return;
+  }
   if (jobDeleteConfirmId.value) {
     cancelDeleteJob();
     return;
@@ -2603,6 +3529,18 @@ function onGlobalEscape(e) {
   }
   if (jobModalOpen.value) {
     requestCloseJobModal();
+    return;
+  }
+  if (styleEditorOpen.value) {
+    closeStyleEditor();
+    return;
+  }
+  if (roleEditorOpen.value) {
+    closeRoleEditor();
+    return;
+  }
+  if (builtinRoleDetailOpen.value) {
+    closeBuiltinRoleDetail();
     return;
   }
   if (addQuestionModalOpen.value) {
@@ -2663,12 +3601,13 @@ onBeforeUnmount(() => {
       <div class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
         <div class="p-4 border-b border-gray-200">
           <div class="flex items-center gap-3">
-            <div
-              class="w-10 h-10 rounded-lg bg-primary text-white flex items-center justify-center text-lg font-bold shrink-0 tracking-tight"
-              aria-hidden="true"
-            >
-              M
-            </div>
+            <img
+              src="/app-icon.png"
+              alt="MienMien 面面面试助手"
+              width="40"
+              height="40"
+              class="w-10 h-10 rounded-xl shrink-0 object-cover shadow-sm ring-1 ring-gray-200/90 bg-white"
+            />
             <div>
               <h1 class="text-lg font-bold text-gray-800 leading-tight">面面MienMien</h1>
               <p class="text-xs text-gray-500">专业面试管理</p>
@@ -2729,6 +3668,42 @@ onBeforeUnmount(() => {
               <button type="button" :class="sidebarNavButtonClass(item.key)" @click="switchTab(item.key)">
                 <i :class="item.iconClass" class="w-7 text-center shrink-0 opacity-90"></i>
                 <span class="min-w-0 flex-1 truncate">{{ item.label }}</span>
+              </button>
+            </li>
+          </ul>
+
+          <div class="px-2 pt-2 mt-1">
+            <div class="rounded-md bg-gray-100 px-3 py-2 text-xs font-medium text-gray-500">面试管理</div>
+          </div>
+          <ul class="mt-1 px-0 list-none m-0 p-0">
+            <li class="mb-0.5 px-2">
+              <button
+                type="button"
+                :class="sidebarNavButtonClass('interview-style-mgmt', { sub: true })"
+                @click="switchTab('interview-style-mgmt')"
+              >
+                <i class="fa-solid fa-masks-theater w-7 text-center shrink-0 opacity-90"></i>
+                <span class="min-w-0 flex-1 truncate">面试官风格管理</span>
+              </button>
+            </li>
+            <li class="mb-0.5 px-2">
+              <button
+                type="button"
+                :class="sidebarNavButtonClass('interview-role-mgmt', { sub: true })"
+                @click="switchTab('interview-role-mgmt')"
+              >
+                <i class="fa-solid fa-user-tie w-7 text-center shrink-0 opacity-90"></i>
+                <span class="min-w-0 flex-1 truncate">面试官角色管理</span>
+              </button>
+            </li>
+            <li class="mb-0.5 px-2">
+              <button
+                type="button"
+                :class="sidebarNavButtonClass('interview-voiceprint-mgmt', { sub: true })"
+                @click="switchTab('interview-voiceprint-mgmt')"
+              >
+                <i class="fa-solid fa-fingerprint w-7 text-center shrink-0 opacity-90"></i>
+                <span class="min-w-0 flex-1 truncate">全局声纹</span>
               </button>
             </li>
           </ul>
@@ -2800,6 +3775,9 @@ onBeforeUnmount(() => {
             activeTab !== 'space-mgmt' &&
             activeTab !== 'db-inspector' &&
             activeTab !== 'user' &&
+            activeTab !== 'interview-style-mgmt' &&
+            activeTab !== 'interview-role-mgmt' &&
+            activeTab !== 'interview-voiceprint-mgmt' &&
             !currentSpaceId
           "
           class="bg-white rounded-lg shadow-card p-8 text-center fade-in"
@@ -2909,7 +3887,18 @@ onBeforeUnmount(() => {
                 <p v-if="resumeUpdatedLabel(r)" class="text-[11px] text-gray-400 mb-1">更新 {{ resumeUpdatedLabel(r) }}</p>
                 <p class="text-xs text-gray-500 mb-1">{{ resumeModuleCount(r) }} 个模块</p>
                 <p class="text-xs text-gray-600 line-clamp-2 leading-relaxed">{{ resumeCardPreview(r) }}</p>
-                <p class="text-xs text-primary mt-2 font-medium">点击进入编辑 →</p>
+                <div class="flex items-center justify-between gap-2 mt-2 flex-wrap">
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1.5 text-xs text-gray-600 hover:text-primary font-medium disabled:opacity-50"
+                    :disabled="resumeExportingId === r.resumeId"
+                    @click.stop="exportResumePdfFromRow(r)"
+                  >
+                    <i class="fa-solid fa-file-pdf"></i>
+                    {{ resumeExportingId === r.resumeId ? "生成中…" : "导出 PDF" }}
+                  </button>
+                  <p class="text-xs text-primary font-medium shrink-0">点击进入编辑 →</p>
+                </div>
               </div>
             </div>
           </div>
@@ -2928,6 +3917,15 @@ onBeforeUnmount(() => {
                 <i class="fa-solid fa-file-pen text-primary"></i>
                 <span class="truncate">简历详情</span>
               </h2>
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 px-3 py-2 text-sm text-primary border border-primary/30 rounded-lg hover:bg-blue-50 disabled:opacity-50"
+                :disabled="!!resumeExportingId"
+                @click="exportCurrentResumeDetailPdf"
+              >
+                <i class="fa-solid fa-file-pdf"></i>
+                {{ resumeExportingId ? "生成中…" : "导出 PDF" }}
+              </button>
               <button
                 type="button"
                 class="inline-flex items-center gap-2 px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50"
@@ -3036,11 +4034,80 @@ onBeforeUnmount(() => {
                       <i class="fa-solid fa-trash"></i>
                     </button>
                   </div>
-                  <textarea
-                    v-model="b.text"
-                    rows="5"
-                    class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-y min-h-[6rem]"
-                  />
+                  <div class="rounded-lg border border-gray-200 overflow-hidden bg-white">
+                    <div
+                      class="flex flex-wrap gap-1 p-2 border-b border-gray-200 bg-gray-50"
+                      @mousedown.prevent
+                    >
+                      <button
+                        type="button"
+                        class="p-2 rounded text-gray-600 hover:bg-gray-200 hover:text-gray-900 transition-colors text-sm font-bold"
+                        title="加粗"
+                        @click="rtCommand('bold')"
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        class="p-2 rounded text-gray-600 hover:bg-gray-200 hover:text-gray-900 transition-colors text-sm italic"
+                        title="斜体"
+                        @click="rtCommand('italic')"
+                      >
+                        I
+                      </button>
+                      <button
+                        type="button"
+                        class="p-2 rounded text-gray-600 hover:bg-gray-200 hover:text-gray-900 transition-colors text-sm underline"
+                        title="下划线"
+                        @click="rtCommand('underline')"
+                      >
+                        U
+                      </button>
+                      <button
+                        type="button"
+                        class="p-2 rounded text-gray-600 hover:bg-gray-200 transition-colors"
+                        title="删除线"
+                        @click="rtCommand('strikeThrough')"
+                      >
+                        <i class="fa-solid fa-strikethrough text-xs"></i>
+                      </button>
+                      <button
+                        type="button"
+                        class="p-2 rounded text-gray-600 hover:bg-gray-200 transition-colors"
+                        title="无序列表"
+                        @click="rtCommand('insertUnorderedList')"
+                      >
+                        <i class="fa-solid fa-list-ul text-xs"></i>
+                      </button>
+                      <button
+                        type="button"
+                        class="p-2 rounded text-gray-600 hover:bg-gray-200 transition-colors"
+                        title="有序列表"
+                        @click="rtCommand('insertOrderedList')"
+                      >
+                        <i class="fa-solid fa-list-ol text-xs"></i>
+                      </button>
+                      <button
+                        type="button"
+                        class="p-2 rounded text-gray-600 hover:bg-gray-200 transition-colors"
+                        title="链接"
+                        @click="rtInsertLink"
+                      >
+                        <i class="fa-solid fa-link text-xs"></i>
+                      </button>
+                    </div>
+                    <div
+                      :ref="(el) => bindResumeBlockBodyEl(b, el)"
+                      data-resume-block-body
+                      :data-resume-block-id="b.id"
+                      contenteditable="true"
+                      draggable="false"
+                      class="min-h-[6rem] max-h-[28rem] overflow-y-auto px-3 py-2 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-inset focus:ring-primary/30"
+                      @dragstart.stop
+                      @focusin="onResumeBlockBodyFocusIn"
+                      @input="onResumeBlockBodyInput(b, $event)"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -3160,7 +4227,7 @@ onBeforeUnmount(() => {
             <div class="mt-6 rounded-lg border border-blue-100 bg-blue-50/60 px-4 py-3 text-sm text-blue-900">
               <p class="font-semibold text-blue-950 mb-1">岗位管理说明</p>
               <p>
-                支持「添加岗位」快速建档，「导入 JD」将引导你在编辑弹窗中粘贴；岗位描述、JD 富文本与考点关键词均保存在该岗位记录中。编辑弹窗可拖拽标题栏移动；点击遮罩关闭时若有未保存更改将询问是否保存。
+                支持「添加岗位」快速建档：弹窗顶部可粘贴 JD 并「一键解析岗位信息」回填名称、公司、地点、类型与薪资；考点关键词、岗位描述与 JD 正文会写入数据库（新增时仅展示前五项，编辑时可查看与修改后三项）。「导入 JD」将直接打开添加弹窗。编辑弹窗可拖拽标题栏移动；点击遮罩关闭时若有未保存更改将询问是否保存。
               </p>
             </div>
           </div>
@@ -3390,51 +4457,360 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section v-if="activeTab === 'mock' && currentSpaceId" class="fade-in space-y-8">
-          <div class="flex justify-between items-center flex-wrap gap-3">
-            <h2 class="text-xl font-bold text-gray-800 flex items-center gap-2">
-              <i class="fa-solid fa-circle-play text-primary"></i>模拟面试（结构与正式一致）
-            </h2>
-            <button
-              type="button"
-              class="bg-primary hover:bg-blue-700 text-white px-6 py-2.5 rounded-md text-sm font-medium shadow-sm"
-              @click="saveMock"
-            >
-              保存模拟面试
-            </button>
+        <section v-if="activeTab === 'mock' && currentSpaceId" class="fade-in space-y-6">
+          <div v-if="mockUiPhase === 'list'" class="bg-white rounded-lg shadow-card p-6">
+            <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
+              <div>
+                <h2 class="text-lg font-semibold text-gray-800 mb-1 flex items-center gap-2">
+                  <i class="fa-solid fa-circle-play text-primary"></i>模拟面试
+                </h2>
+                <p class="text-sm text-gray-500">
+                  先创建会话并绑定本空间岗位；点卡片进入后可通过「添加面试」维护多轮与题目，保存更新本条记录。
+                </p>
+              </div>
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 shrink-0 px-4 py-2.5 bg-primary hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm"
+                @click="openCreateMockInterviewModal"
+              >
+                <i class="fa-solid fa-plus"></i>创建模拟面试
+              </button>
+            </div>
+            <p v-if="mockSessionsSorted.length === 0" class="text-sm text-gray-500">暂无模拟面试会话，请点击右上角创建。</p>
+            <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <button
+                v-for="row in mockSessionsSorted"
+                :key="row.recordId"
+                type="button"
+                class="text-left rounded-lg border border-gray-200 p-4 hover:border-primary/50 hover:shadow-card bg-gray-50/50 transition-all"
+                @click="openMockInterviewSessionDetail(row)"
+              >
+                <p class="font-medium text-gray-900 text-sm">{{ interviewSessionCardTitle(row) }}</p>
+                <p class="text-xs text-gray-500 mt-1">{{ interviewSessionCardSubtitle(row) }}</p>
+                <p class="text-xs text-primary mt-2 font-medium">点击进入 →</p>
+              </button>
+            </div>
           </div>
-          <InterviewRoundsPanel
-            :job-profile="mockJobProfile"
-            :rounds="mockInterviewRounds"
-            @add-round="openAddInterviewModal(true)"
-            @edit-round="(i) => openEditInterviewModal(true, i)"
-            @remove-round="(i) => removeInterviewRound(true, i)"
-            @add-question="(i) => openAddQuestionModal(true, i)"
-            @edit-question="(i, q) => openEditQuestionModal(true, i, q)"
-            @remove-question="(i, id) => removeQuestionFromRound(true, i, id)"
-          />
+          <div v-else class="space-y-6">
+            <div class="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                @click="backToMockInterviewList"
+              >
+                <i class="fa-solid fa-arrow-left"></i>返回列表
+              </button>
+              <h3 class="text-lg font-semibold text-gray-800 flex-1">模拟面试详情</h3>
+              <button
+                type="button"
+                class="bg-primary hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-medium"
+                @click="saveMockInterviewSession"
+              >
+                保存
+              </button>
+            </div>
+            <div class="bg-white rounded-lg shadow-card border border-gray-100 px-5 py-3 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+              <span class="text-gray-500 shrink-0">绑定岗位</span>
+              <span class="font-medium text-gray-900">{{ mockInterviewBoundJobSummary }}</span>
+            </div>
+            <InterviewRoundsPanel
+              :job-profile="mockJobProfile"
+              :rounds="mockInterviewRounds"
+              :style-options="interviewerStyleSelectOptions"
+              :interviewer-role-catalog="interviewerRoleCatalog"
+              :show-job-section="false"
+              :show-video-start-button="true"
+              :record-video-interview-meta="mockRecordVideoInterviewMeta"
+              @add-round="openAddInterviewModal(true)"
+              @edit-round="(i) => openEditInterviewModal(true, i)"
+              @remove-round="(i) => removeInterviewRound(true, i)"
+              @add-question="(i) => openAddQuestionModal(true, i)"
+              @edit-question="(i, q) => openEditQuestionModal(true, i, q)"
+              @remove-question="(i, id) => removeQuestionFromRound(true, i, id)"
+              @start-video-interview="(i) => handleStartVideoInterview(true, i)"
+            />
+          </div>
         </section>
 
-        <section v-if="activeTab === 'interview' && currentSpaceId" class="fade-in space-y-8">
-          <InterviewRoundsPanel
-            :job-profile="realJobProfile"
-            :rounds="realInterviewRounds"
-            @add-round="openAddInterviewModal(false)"
-            @edit-round="(i) => openEditInterviewModal(false, i)"
-            @remove-round="(i) => removeInterviewRound(false, i)"
-            @add-question="(i) => openAddQuestionModal(false, i)"
-            @edit-question="(i, q) => openEditQuestionModal(false, i, q)"
-            @remove-question="(i, id) => removeQuestionFromRound(false, i, id)"
-          />
-          <div class="flex justify-end">
-            <button
-              type="button"
-              class="bg-primary hover:bg-blue-700 text-white px-6 py-2.5 rounded-md text-sm font-medium shadow-sm"
-              @click="saveInterview"
-            >
-              保存正式面试
-            </button>
+        <section v-if="activeTab === 'interview' && currentSpaceId" class="fade-in space-y-6">
+          <div v-if="realUiPhase === 'list'" class="bg-white rounded-lg shadow-card p-6">
+            <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
+              <div>
+                <h2 class="text-lg font-semibold text-gray-800 mb-1 flex items-center gap-2">
+                  <i class="fa-solid fa-calendar-check text-primary"></i>正式面试
+                </h2>
+                <p class="text-sm text-gray-500">
+                  先创建会话并绑定本空间岗位；点卡片进入后可通过「添加面试」维护多轮与题目。
+                </p>
+              </div>
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 shrink-0 px-4 py-2.5 bg-primary hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm"
+                @click="openCreateRealInterviewModal"
+              >
+                <i class="fa-solid fa-plus"></i>创建正式面试
+              </button>
+            </div>
+            <p v-if="realSessionsSorted.length === 0" class="text-sm text-gray-500">暂无正式面试会话，请点击右上角创建。</p>
+            <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <button
+                v-for="row in realSessionsSorted"
+                :key="row.recordId"
+                type="button"
+                class="text-left rounded-lg border border-gray-200 p-4 hover:border-primary/50 hover:shadow-card bg-gray-50/50 transition-all"
+                @click="openRealInterviewSessionDetail(row)"
+              >
+                <p class="font-medium text-gray-900 text-sm">{{ interviewSessionCardTitle(row) }}</p>
+                <p class="text-xs text-gray-500 mt-1">{{ interviewSessionCardSubtitle(row) }}</p>
+                <p class="text-xs text-primary mt-2 font-medium">点击进入 →</p>
+              </button>
+            </div>
           </div>
+          <div v-else class="space-y-6">
+            <div class="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                @click="backToRealInterviewList"
+              >
+                <i class="fa-solid fa-arrow-left"></i>返回列表
+              </button>
+              <h3 class="text-lg font-semibold text-gray-800 flex-1">正式面试详情</h3>
+              <button
+                type="button"
+                class="bg-primary hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-medium"
+                @click="saveRealInterviewSession"
+              >
+                保存
+              </button>
+            </div>
+            <InterviewRoundsPanel
+              :job-profile="realJobProfile"
+              :rounds="realInterviewRounds"
+              :style-options="interviewerStyleSelectOptions"
+              :interviewer-role-catalog="interviewerRoleCatalog"
+              :show-video-start-button="true"
+              :record-video-interview-meta="realRecordVideoInterviewMeta"
+              @add-round="openAddInterviewModal(false)"
+              @edit-round="(i) => openEditInterviewModal(false, i)"
+              @remove-round="(i) => removeInterviewRound(false, i)"
+              @add-question="(i) => openAddQuestionModal(false, i)"
+              @edit-question="(i, q) => openEditQuestionModal(false, i, q)"
+              @remove-question="(i, id) => removeQuestionFromRound(false, i, id)"
+              @start-video-interview="(i) => handleStartVideoInterview(false, i)"
+            />
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'interview-style-mgmt'" class="fade-in space-y-6">
+          <div
+            v-if="!currentUser"
+            class="border border-amber-200 bg-amber-50 text-amber-900 text-sm rounded-lg px-4 py-3 flex items-start gap-2"
+          >
+            <i class="fa-solid fa-triangle-exclamation mt-0.5 shrink-0"></i>
+            <span>请先登录后再管理面试官风格；数据按当前账号保存，与所选工作空间无关。</span>
+          </div>
+          <template v-else>
+            <div class="bg-white rounded-lg shadow-card p-6">
+              <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
+                <div>
+                  <h2 class="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                    <i class="fa-solid fa-masks-theater text-primary"></i>面试官风格管理
+                  </h2>
+                  <p class="text-sm text-gray-500 mt-1 max-w-2xl">
+                    内置四类为通用 AI 语音模拟面试话术模版；下方卡片为<strong>自定义</strong>风格（Prompt 由你维护）。在模拟/正式面试的「面试流程」中可为每一轮选择对应风格。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-2 shrink-0 px-4 py-2.5 bg-primary hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm"
+                  @click="openStyleEditorCreate"
+                >
+                  <i class="fa-solid fa-plus"></i>新建自定义风格
+                </button>
+              </div>
+
+              <h3 class="text-sm font-semibold text-gray-700 mb-3">内置风格（只读）</h3>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">
+                <div
+                  v-for="b in BUILTIN_INTERVIEWER_STYLES"
+                  :key="b.key"
+                  class="rounded-lg border border-gray-200 bg-gray-50/80 p-4"
+                >
+                  <div class="flex items-center justify-between gap-2 mb-2">
+                    <span class="font-medium text-gray-900">{{ b.label }}</span>
+                    <span class="text-[10px] uppercase tracking-wide text-gray-500 bg-white border border-gray-200 px-2 py-0.5 rounded"
+                      >内置</span
+                    >
+                  </div>
+                  <p class="text-xs text-gray-600 leading-relaxed line-clamp-4 font-mono whitespace-pre-wrap">{{ b.prompt }}</p>
+                </div>
+              </div>
+
+              <h3 class="text-sm font-semibold text-gray-700 mb-3">我的自定义风格</h3>
+              <p v-if="!interviewerCustomStyles.length" class="text-sm text-gray-500 py-6 text-center border border-dashed border-gray-200 rounded-lg">
+                暂无自定义卡片，点击右上角「新建自定义风格」。
+              </p>
+              <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div
+                  v-for="row in interviewerCustomStyles"
+                  :key="row.styleId"
+                  class="rounded-lg border border-gray-200 p-4 hover:border-primary/40 transition-colors bg-white"
+                >
+                  <div class="flex items-start justify-between gap-2 mb-2">
+                    <div class="min-w-0">
+                      <p class="font-medium text-gray-900 truncate">{{ row.title || "未命名" }}</p>
+                      <p class="text-[11px] text-gray-400 font-mono truncate mt-0.5">{{ row.styleId }}</p>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        class="text-primary hover:text-blue-800 p-1.5 rounded"
+                        title="编辑"
+                        @click="openStyleEditorEdit(row)"
+                      >
+                        <i class="fa-solid fa-pencil"></i>
+                      </button>
+                      <button
+                        type="button"
+                        class="text-gray-400 hover:text-red-600 p-1.5 rounded"
+                        title="删除"
+                        @click="removeInterviewerStyleRow(row)"
+                      >
+                        <i class="fa-solid fa-trash"></i>
+                      </button>
+                    </div>
+                  </div>
+                  <p class="text-xs text-gray-600 leading-relaxed line-clamp-3 font-mono whitespace-pre-wrap">{{ row.promptBody }}</p>
+                </div>
+              </div>
+            </div>
+          </template>
+        </section>
+
+        <section v-if="activeTab === 'interview-role-mgmt'" class="fade-in space-y-6">
+          <div
+            v-if="!currentUser"
+            class="border border-amber-200 bg-amber-50 text-amber-900 text-sm rounded-lg px-4 py-3 flex items-start gap-2"
+          >
+            <i class="fa-solid fa-triangle-exclamation mt-0.5 shrink-0"></i>
+            <span>请先登录后再管理面试官角色；数据按当前账号保存，与所选工作空间无关。</span>
+          </div>
+          <template v-else>
+            <div class="bg-white rounded-lg shadow-card p-6">
+              <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
+                <div>
+                  <h2 class="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                    <i class="fa-solid fa-user-tie text-primary"></i>面试官角色管理
+                  </h2>
+                  <p class="text-sm text-gray-500 mt-1 max-w-2xl">
+                    维护「角色代号 → 面试内容范围 → 侧重点 → 评估提示」卡片，与模拟/正式面试里每位面试官的<strong>角色标签</strong>对齐（如 HR、peer、ld、+1、+2）。
+                    下方「常用代号」为前端内置快捷项；「我的角色」持久化在服务端，可在添加/编辑面试轮次时从下拉中选择。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-2 shrink-0 px-4 py-2.5 bg-primary hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm"
+                  @click="openRoleEditorCreate"
+                >
+                  <i class="fa-solid fa-plus"></i>新建角色
+                </button>
+              </div>
+
+              <h3 class="text-sm font-semibold text-gray-700 mb-1">常用代号（内置快捷，只读）</h3>
+              <p class="text-xs text-gray-500 mb-3">点击卡片查看内置说明全文（面试内容、侧重点、评估提示）。</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-8">
+                <div
+                  v-for="p in BUILTIN_INTERVIEWER_ROLE_OPTIONS"
+                  :key="p.code"
+                  role="button"
+                  tabindex="0"
+                  class="rounded-lg border border-gray-200 bg-gray-50/80 p-4 text-sm hover:border-primary/50 hover:shadow-sm transition-all cursor-pointer text-left focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  @click="openBuiltinRoleDetail(p)"
+                  @keydown.enter.prevent="openBuiltinRoleDetail(p)"
+                  @keydown.space.prevent="openBuiltinRoleDetail(p)"
+                >
+                  <div class="flex items-center justify-between gap-2 mb-1">
+                    <span class="font-mono font-semibold text-gray-900">{{ p.code }}</span>
+                    <span class="text-[10px] uppercase tracking-wide text-gray-500 bg-white border border-gray-200 px-2 py-0.5 rounded"
+                      >内置</span
+                    >
+                  </div>
+                  <p class="text-gray-600 text-xs leading-relaxed">{{ p.name }}</p>
+                  <p class="text-[11px] text-primary/80 mt-2 font-medium">点击查看全文 →</p>
+                </div>
+              </div>
+
+              <h3 class="text-sm font-semibold text-gray-700 mb-1">我的角色</h3>
+              <p v-if="interviewerRoleCatalog.length" class="text-xs text-gray-500 mb-3">点击任意卡片可打开全文并编辑；删除请点卡片右上角图标。</p>
+              <p
+                v-if="!interviewerRoleCatalog.length"
+                class="text-sm text-gray-500 py-6 text-center border border-dashed border-gray-200 rounded-lg"
+              >
+                暂无自定义角色，点击右上角「新建角色」；角色代号在同一账号下不可重复（不区分大小写）。
+              </p>
+              <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div
+                  v-for="row in interviewerRoleCatalog"
+                  :key="row.roleId"
+                  role="button"
+                  tabindex="0"
+                  class="rounded-lg border border-gray-200 p-4 hover:border-primary/50 hover:shadow-sm transition-all bg-white text-left cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  @click="openRoleEditorEdit(row)"
+                  @keydown.enter.prevent="openRoleEditorEdit(row)"
+                  @keydown.space.prevent="openRoleEditorEdit(row)"
+                >
+                  <div class="flex items-start justify-between gap-2 mb-2">
+                    <div class="min-w-0">
+                      <p class="font-medium text-gray-900">
+                        <span class="font-mono text-primary">{{ row.roleCode }}</span>
+                        <span class="text-gray-400 mx-1">·</span>
+                        <span class="truncate">{{ row.roleName || "未命名" }}</span>
+                      </p>
+                      <p class="text-[11px] text-gray-400 font-mono truncate mt-0.5">{{ row.roleId }}</p>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0" @click.stop>
+                      <button
+                        type="button"
+                        class="text-primary hover:text-blue-800 p-1.5 rounded"
+                        title="编辑"
+                        @click="openRoleEditorEdit(row)"
+                      >
+                        <i class="fa-solid fa-pencil"></i>
+                      </button>
+                      <button
+                        type="button"
+                        class="text-gray-400 hover:text-red-600 p-1.5 rounded"
+                        title="删除"
+                        @click="removeInterviewerRoleRow(row)"
+                      >
+                        <i class="fa-solid fa-trash"></i>
+                      </button>
+                    </div>
+                  </div>
+                  <p class="text-xs text-gray-500 mb-1">
+                    <span class="font-medium text-gray-600">面试内容</span>
+                    {{ (row.interviewContent || "").slice(0, 200) }}{{ (row.interviewContent || "").length > 200 ? "…" : "" }}
+                  </p>
+                  <p class="text-xs text-gray-500">
+                    <span class="font-medium text-gray-600">侧重点</span>
+                    {{ (row.focusPoints || "").slice(0, 200) }}{{ (row.focusPoints || "").length > 200 ? "…" : "" }}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </template>
+        </section>
+
+        <section v-if="activeTab === 'interview-voiceprint-mgmt'" class="fade-in space-y-6">
+          <div
+            v-if="!currentUser"
+            class="border border-amber-200 bg-amber-50 text-amber-900 text-sm rounded-lg px-4 py-3 flex items-start gap-2"
+          >
+            <i class="fa-solid fa-triangle-exclamation mt-0.5 shrink-0"></i>
+            <span>请先登录后再配置全局声纹；数据保存在本机浏览器，与账号、空间无关。</span>
+          </div>
+          <GlobalVoiceprintSettings v-else />
         </section>
 
         <section v-if="activeTab === 'config'" class="fade-in space-y-6">
@@ -3570,14 +4946,32 @@ onBeforeUnmount(() => {
             <h2 class="text-lg font-semibold text-gray-800 mb-2">无权访问</h2>
             <p class="text-gray-500 text-sm">库表看板仅限指定账号使用。</p>
           </div>
-          <div v-else class="grid grid-cols-1 lg:grid-cols-4 gap-4 items-start">
+          <div v-else class="space-y-4">
+            <div
+              class="rounded-lg border border-blue-100 bg-blue-50/90 px-4 py-3 text-sm text-gray-700 leading-relaxed shadow-sm"
+            >
+              <p class="font-medium text-gray-900 mb-1">岗位信息落在哪张表？</p>
+              <p>
+                库表设计为 <code class="px-1 py-0.5 rounded bg-white/80 text-gray-800 text-xs">mm_job_position</code>
+                与多空间关联表 <code class="px-1 py-0.5 rounded bg-white/80 text-xs">mm_job_position_space</code>
+                （字段含 user_id、position_id、space_id、title、company、location、base_range、status、时间戳等，见仓库
+                <code class="px-1 py-0.5 rounded bg-white/80 text-xs">scripts/migrate-mm-job-position-table.sql</code>
+                、<code class="px-1 py-0.5 rounded bg-white/80 text-xs">scripts/migrate-mm-job-position-jdbc-persist.sql</code>
+                及扩容脚本）。
+              </p>
+              <p class="mt-2 text-emerald-900/90">
+                「岗位管理」列表由 business 经 <code class="px-1 rounded bg-white/70 text-xs">JdbcJobPositionRepository</code>
+                读写上述表；若库表看板行数与界面不一致，请核对是否连到同一数据库、是否已执行迁移脚本。
+              </p>
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 items-start">
             <div class="lg:col-span-1 bg-white rounded-lg shadow-card p-4">
               <h3 class="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
                 <i class="fa-solid fa-table text-primary"></i>数据表
               </h3>
               <p v-if="dbInspectorLoading && !dbInspectorTables.length" class="text-xs text-gray-500">加载中…</p>
               <ul v-else class="max-h-[70vh] overflow-y-auto text-sm space-y-0.5 list-none m-0 p-0">
-                <li v-for="t in dbInspectorTables" :key="t">
+                <li v-for="t in dbInspectorTablesSorted" :key="t">
                   <button
                     type="button"
                     class="w-full text-left px-2 py-1.5 rounded truncate"
@@ -3588,12 +4982,19 @@ onBeforeUnmount(() => {
                     "
                     @click="selectDbInspectorTable(t)"
                   >
-                    {{ t }}
+                    {{ dbInspectorTableSidebarLabel(t) }}
                   </button>
                 </li>
               </ul>
             </div>
             <div class="lg:col-span-3 bg-white rounded-lg shadow-card p-4 min-w-0">
+              <p
+                v-if="dbInspectorSelectedTable === MM_JOB_POSITION_TABLE"
+                class="mb-3 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 leading-relaxed"
+              >
+                当前已查看岗位表 <strong class="font-medium">mm_job_position</strong>。多空间关联在
+                <strong class="font-medium">mm_job_position_space</strong>；行数与「岗位管理」不一致时请核对库连接与迁移。
+              </p>
               <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
                 <h3 class="text-sm font-semibold text-gray-700 truncate">
                   <span v-if="dbInspectorSelectedTable">{{ dbInspectorSelectedTable }}</span>
@@ -3659,6 +5060,7 @@ onBeforeUnmount(() => {
               <p class="mt-3 text-[11px] text-gray-400 leading-relaxed">
                 每页最多 500 行（当前 {{ dbInspectorLimit }}）。敏感字段请注意环境安全；生产环境请移除此入口或改为更细审计。
               </p>
+            </div>
             </div>
           </div>
         </section>
@@ -4181,6 +5583,16 @@ onBeforeUnmount(() => {
             </select>
           </div>
           <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">面试官风格（AI 语音模拟）</label>
+            <select
+              v-model="interviewDraft.interviewerStyleKey"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary bg-white"
+            >
+              <option v-for="opt in interviewerStyleSelectOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">与每轮面试流程卡片中的风格选择一致；自定义项在「面试官风格管理」中维护。</p>
+          </div>
+          <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">面试官信息</label>
             <div class="space-y-2">
               <div v-for="(row, ri) in interviewDraft.interviewers" :key="ri" class="flex gap-2 items-center">
@@ -4188,16 +5600,15 @@ onBeforeUnmount(() => {
                   v-model="row.role"
                   class="flex-1 min-w-0 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                 >
-                  <option value="HR">HR</option>
-                  <option value="P">Peer</option>
-                  <option value="+1">+1LD</option>
-                  <option value="+2">+2LD</option>
+                  <option v-for="opt in interviewerRoleModalSelectOptions" :key="`${ri}-${opt.value}`" :value="opt.value">
+                    {{ opt.label }}
+                  </option>
                 </select>
                 <input
                   v-model="row.name"
                   type="text"
                   class="flex-1 min-w-0 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                  placeholder="面试官姓名"
+                  placeholder="姓名（选填）"
                 />
                 <button type="button" class="text-red-500 p-2 shrink-0" @click="removeInterviewerRow(ri)">
                   <i class="fa-solid fa-circle-xmark"></i>
@@ -4208,6 +5619,9 @@ onBeforeUnmount(() => {
               <i class="fa-solid fa-circle-plus"></i>
               添加面试官
             </button>
+            <p class="text-xs text-gray-400 mt-1.5">
+              角色代号可在侧栏 <strong>面试管理 → 面试官角色管理</strong> 中扩展说明（面试内容、侧重点、评估提示）；下拉含内置常用项与您的自定义角色。
+            </p>
           </div>
         </div>
         <div class="shrink-0 p-6 border-t border-gray-200 flex justify-end gap-3 bg-gray-50/80">
@@ -4216,6 +5630,193 @@ onBeforeUnmount(() => {
           </button>
           <button type="button" class="px-4 py-2 bg-primary hover:bg-blue-700 text-white rounded-md text-sm" @click="submitInterviewModal">
             {{ editingRoundIndex >= 0 ? "保存" : "添加" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="styleEditorOpen"
+      class="fixed inset-0 z-[75] flex items-center justify-center bg-black/50 p-4"
+      @click.self="closeStyleEditor"
+    >
+      <div
+        class="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-3xl max-h-[92vh] flex flex-col overflow-hidden"
+        @click.stop
+      >
+        <div class="shrink-0 p-5 border-b border-gray-200 flex items-center justify-between gap-2">
+          <h3 class="text-lg font-bold text-gray-800">{{ styleEditorMode === "edit" ? "编辑自定义风格" : "新建自定义面试官风格" }}</h3>
+          <button type="button" class="text-gray-400 hover:text-gray-700 p-2 rounded" aria-label="关闭" @click="closeStyleEditor">
+            <i class="fa-solid fa-xmark text-lg"></i>
+          </button>
+        </div>
+        <div class="min-h-0 flex-1 overflow-y-auto p-5 space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">风格名称</label>
+            <input
+              v-model="styleEditorTitle"
+              type="text"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              placeholder="例如：某业务线专用风格"
+            />
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="text-sm text-primary border border-primary/40 rounded-md px-3 py-1.5 hover:bg-blue-50"
+              @click="applyInterviewerStyleTemplate"
+            >
+              填入 Prompt 骨架模版
+            </button>
+            <span class="text-xs text-gray-500">可在模版基础上改写角色、规则与占位说明。</span>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Prompt 正文</label>
+            <textarea
+              v-model="styleEditorPrompt"
+              rows="16"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-xs font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-primary resize-y min-h-[12rem]"
+              placeholder="在此编写完整面试官 Prompt…"
+            ></textarea>
+          </div>
+        </div>
+        <div class="shrink-0 p-5 border-t border-gray-200 flex justify-end gap-3 bg-gray-50/80">
+          <button type="button" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-white" @click="closeStyleEditor">
+            取消
+          </button>
+          <button
+            type="button"
+            class="px-4 py-2 bg-primary hover:bg-blue-700 text-white rounded-md text-sm disabled:opacity-50"
+            :disabled="styleEditorSaving"
+            @click="submitStyleEditor"
+          >
+            {{ styleEditorSaving ? "保存中…" : "保存" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="roleEditorOpen"
+      class="fixed inset-0 z-[75] flex items-center justify-center bg-black/50 p-4"
+      @click.self="closeRoleEditor"
+    >
+      <div
+        class="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-3xl max-h-[92vh] flex flex-col overflow-hidden"
+        @click.stop
+      >
+        <div class="shrink-0 p-5 border-b border-gray-200 flex items-center justify-between gap-2">
+          <h3 class="text-lg font-bold text-gray-800">{{ roleEditorMode === "edit" ? "查看 / 编辑面试官角色" : "新建面试官角色" }}</h3>
+          <button type="button" class="text-gray-400 hover:text-gray-700 p-2 rounded" aria-label="关闭" @click="closeRoleEditor">
+            <i class="fa-solid fa-xmark text-lg"></i>
+          </button>
+        </div>
+        <div class="min-h-0 flex-1 overflow-y-auto p-5 space-y-4">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">角色代号</label>
+              <input
+                v-model="roleEditorRoleCode"
+                type="text"
+                class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+                placeholder="如 HR、peer、ld、+1"
+                :disabled="roleEditorMode === 'edit'"
+              />
+              <p class="text-xs text-gray-400 mt-1">编辑时不可改代号；仅字母、数字及 _ + - . ，同一账号下不区分大小写唯一。</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">角色名称</label>
+              <input
+                v-model="roleEditorRoleName"
+                type="text"
+                class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                placeholder="展示用名称，如「业务一面 · 直属上级」"
+              />
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">面试内容</label>
+            <textarea
+              v-model="roleEditorInterviewContent"
+              rows="5"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-primary resize-y min-h-[6rem]"
+              placeholder="本角色通常负责的环节、话题范围、与上下游面试的衔接说明等"
+            ></textarea>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">面试侧重点</label>
+            <textarea
+              v-model="roleEditorFocusPoints"
+              rows="5"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-primary resize-y min-h-[6rem]"
+              placeholder="考察维度、能力权重、与岗位/职级的匹配要点等"
+            ></textarea>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">评估与记录建议（选填）</label>
+            <textarea
+              v-model="roleEditorEvaluationHint"
+              rows="3"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-primary resize-y"
+              placeholder="复盘时可关注的记录要点、红线或加分项提示"
+            ></textarea>
+          </div>
+        </div>
+        <div class="shrink-0 p-5 border-t border-gray-200 flex justify-end gap-3 bg-gray-50/80">
+          <button type="button" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-white" @click="closeRoleEditor">
+            取消
+          </button>
+          <button
+            type="button"
+            class="px-4 py-2 bg-primary hover:bg-blue-700 text-white rounded-md text-sm disabled:opacity-50"
+            :disabled="roleEditorSaving"
+            @click="submitRoleEditor"
+          >
+            {{ roleEditorSaving ? "保存中…" : "保存" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="builtinRoleDetailOpen && builtinRoleDetail"
+      class="fixed inset-0 z-[74] flex items-center justify-center bg-black/50 p-4"
+      @click.self="closeBuiltinRoleDetail"
+    >
+      <div
+        class="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden"
+        @click.stop
+      >
+        <div class="shrink-0 p-5 border-b border-gray-200 flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="text-xs text-gray-500 mb-1">内置角色 · 只读说明</p>
+            <h3 class="text-lg font-bold text-gray-900">
+              <span class="font-mono text-primary">{{ builtinRoleDetail.code }}</span>
+              <span class="text-gray-400 mx-1">·</span>
+              <span>{{ builtinRoleDetail.name }}</span>
+            </h3>
+          </div>
+          <button type="button" class="text-gray-400 hover:text-gray-700 p-2 rounded shrink-0" aria-label="关闭" @click="closeBuiltinRoleDetail">
+            <i class="fa-solid fa-xmark text-lg"></i>
+          </button>
+        </div>
+        <div class="min-h-0 flex-1 overflow-y-auto p-5 space-y-5 text-sm text-gray-700">
+          <div>
+            <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">面试内容</h4>
+            <p class="leading-relaxed whitespace-pre-wrap">{{ builtinRoleDetail.interviewContent }}</p>
+          </div>
+          <div>
+            <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">面试侧重点</h4>
+            <p class="leading-relaxed whitespace-pre-wrap">{{ builtinRoleDetail.focusPoints }}</p>
+          </div>
+          <div v-if="(builtinRoleDetail.evaluationHint || '').trim()">
+            <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">评估与记录建议</h4>
+            <p class="leading-relaxed whitespace-pre-wrap">{{ builtinRoleDetail.evaluationHint }}</p>
+          </div>
+        </div>
+        <div class="shrink-0 p-4 border-t border-gray-200 bg-gray-50/80 flex justify-end">
+          <button type="button" class="px-4 py-2 bg-primary hover:bg-blue-700 text-white rounded-md text-sm" @click="closeBuiltinRoleDetail">
+            关闭
           </button>
         </div>
       </div>
@@ -4458,6 +6059,58 @@ onBeforeUnmount(() => {
 
     <Teleport to="body">
       <div
+        v-if="createInterviewSessionModalOpen"
+        class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4"
+        @click.self="closeCreateInterviewSessionModal"
+      >
+        <div class="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-md p-6" @click.stop>
+          <h3 class="text-lg font-bold text-gray-900 mb-1">
+            {{ createInterviewSessionKind === "mock" ? "创建模拟面试" : "创建正式面试" }}
+          </h3>
+          <p class="text-sm text-gray-500 mb-4">请选择当前工作空间下已绑定的岗位，用于带入岗位信息与 JD。</p>
+          <label class="block text-sm text-gray-700 mb-4">
+            <span class="font-medium">绑定岗位</span>
+            <select
+              v-model="createInterviewSessionJobId"
+              class="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary bg-white"
+            >
+              <option v-for="j in jobsLinkedToCurrentSpace" :key="j.positionId" :value="String(j.positionId)">
+                {{ jobBindLabel(j) }}
+              </option>
+            </select>
+          </label>
+          <div class="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              class="px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+              @click="closeCreateInterviewSessionModal"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              class="px-4 py-2 bg-primary hover:bg-blue-700 text-white text-sm font-medium rounded-lg"
+              @click="submitCreateInterviewSession"
+            >
+              创建
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <VideoInterviewRoom
+        v-if="videoInterviewRoomOpen && videoInterviewSessionPayload"
+        :session="videoInterviewSessionPayload"
+        :interviewer-custom-styles="interviewerCustomStyles"
+        :context="videoInterviewRoomContext"
+        @close="closeVideoInterviewRoom"
+      />
+    </Teleport>
+
+    <Teleport to="body">
+      <div
         v-if="jobModalOpen"
         class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4"
         @click.self="requestCloseJobModal"
@@ -4485,6 +6138,49 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          <div class="rounded-lg border border-dashed border-primary/30 bg-blue-50/40 p-4 space-y-3">
+            <label class="block text-sm font-medium text-gray-800">
+              岗位信息（JD 描述）
+            </label>
+            <textarea
+              v-model="jobModalJdPaste"
+              rows="5"
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-y bg-white"
+              placeholder="粘贴完整招聘 JD，点击下方按钮解析后将自动回填上方表单字段；考点关键词、岗位描述与 JD 正文会一并写入数据库（新增弹窗中不展示后三项，保存时仍入库）"
+            />
+            <input
+              ref="jobModalJdImageInputRef"
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              class="sr-only"
+              tabindex="-1"
+              aria-hidden="true"
+              @change="onJobModalJdImageSelected"
+            />
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 px-4 py-2 bg-primary hover:bg-blue-700 text-white rounded-lg text-sm disabled:opacity-50"
+                :disabled="jobModalJdAnalyzing"
+                @click="runJobModalParseJdFull"
+              >
+                <i class="fa-solid fa-wand-magic-sparkles"></i>{{ jobModalJdAnalyzing ? "解析中…" : "一键解析岗位信息" }}
+              </button>
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 px-4 py-2 border border-primary text-primary hover:bg-blue-50 rounded-lg text-sm disabled:opacity-50"
+                :disabled="jobModalJdAnalyzing"
+                @click="openJobModalJdImagePicker"
+              >
+                <i class="fa-solid fa-image"></i>{{ jobModalJdAnalyzing ? "解析中…" : "上传图片解析" }}
+              </button>
+              <span class="text-xs text-gray-600">
+                解析由服务端调用已保存的模型配置；文本 JD 可用 OpenAI 兼容或 Anthropic 网关。<strong class="font-medium text-gray-800">图片</strong>仅走
+                OpenAI 兼容（如 …/compatible-mode/v1），模型须支持图片（如 <strong class="font-medium text-gray-800">qwen3.5-plus</strong>、qwen-vl-plus
+                等，以百炼控制台为准）。Anthropic 网关下请改用 compatible Base URL 后再试。
+              </span>
+            </div>
+          </div>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <label class="block text-sm text-gray-700">
               <span class="font-medium">岗位名称 <span class="text-red-500">*</span></span>
@@ -4538,25 +6234,6 @@ onBeforeUnmount(() => {
             />
           </label>
           <div v-if="jobModalMode === 'edit'" class="space-y-4 border-t border-gray-100 pt-4">
-            <div class="rounded-lg border border-dashed border-gray-200 bg-gray-50/80 p-4 space-y-3">
-              <label class="block text-sm font-medium text-gray-700">
-                粘贴完整 JD（仅用于一键拆解，可不写入岗位正文）
-              </label>
-              <textarea
-                v-model="jobModalJdPaste"
-                rows="4"
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-y bg-white"
-                placeholder="将招聘 JD 粘贴到此处后点击拆解，结果写入下方「考点关键词」"
-              />
-              <button
-                type="button"
-                class="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-white disabled:opacity-50"
-                :disabled="jobModalJdAnalyzing"
-                @click="runJobModalAnalyzeFocusPoints"
-              >
-                <i class="fa-solid fa-wand-magic-sparkles"></i>{{ jobModalJdAnalyzing ? "拆解中…" : "一键拆解考点" }}
-              </button>
-            </div>
             <label class="block text-sm text-gray-700">
               <span class="font-medium">考点关键词（逗号分隔，可选）</span>
               <textarea
@@ -4817,7 +6494,12 @@ onBeforeUnmount(() => {
                   class="rounded-lg border border-gray-200 bg-white px-4 py-3"
                 >
                   <p class="text-sm font-medium text-gray-900 border-b border-gray-100 pb-2 mb-2">{{ m.title || "未命名模块" }}</p>
-                  <pre class="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed m-0">{{ m.text || "（无正文）" }}</pre>
+                  <div
+                    v-if="(m.text || '').trim()"
+                    class="text-sm text-gray-700 leading-relaxed max-w-none [&_a]:text-primary [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
+                    v-html="resumeBodyHtmlFromStored(m.text || '')"
+                  />
+                  <p v-else class="text-sm text-gray-400 m-0">（无正文）</p>
                 </div>
               </div>
               <p v-else class="text-sm text-gray-500 border border-dashed border-gray-200 rounded-lg px-4 py-6 text-center">

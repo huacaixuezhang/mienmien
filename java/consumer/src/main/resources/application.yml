@@ -5,13 +5,18 @@ spring:
   threads:
     virtual:
       enabled: true
+  servlet:
+    multipart:
+      max-file-size: 12MB
+      max-request-size: 12MB
   datasource:
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:MienMieApp}?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
     username: ${DB_USER:root}
-    password: ${DB_PASSWORD:}
+    password: ${DB_PASSWORD:root}
   ai:
     dashscope:
-      api-key: ${DASHSCOPE_API_KEY:}
+      # 本地开发：在下方引号内填写百炼通用 API Key（sk- 开头）。切勿将含真实密钥的 application.yml 推送到公共远程仓库。
+      api-key: "sk-08b1bbff1eb047328c1131c3d062f8d4"
       models:
         audio-transcription: ${DASHSCOPE_ASR_MODEL:paraformer-realtime-v2}
 
@@ -19,11 +24,27 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
 
 mienmien:
   consumer:
     stream-degraded: false
+    schema:
+      auto-patch-video-interview: ${CONSUMER_AUTO_PATCH_VIDEO_SCHEMA:true}
+  video-interview:
+    dashscope-base-url: ${VIDEO_INTERVIEW_DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    orchestrator-model: ${VIDEO_INTERVIEW_ORCHESTRATOR_MODEL:qwen-turbo}
+    judge-model: ${VIDEO_INTERVIEW_JUDGE_MODEL:qwen-turbo}
+    qwen-asr-model: ${VIDEO_INTERVIEW_QWEN_ASR_MODEL:qwen3-asr-flash}
+    # 与钉钉同类：浏览器 PCM → 服务端 Omni WebSocket 流式转写（需 spring.ai.dashscope.api-key）
+    realtime-asr-enabled: ${VIDEO_INTERVIEW_REALTIME_ASR_ENABLED:true}
+    realtime-asr-model: ${VIDEO_INTERVIEW_REALTIME_ASR_MODEL:qwen3-asr-flash-realtime}
+    realtime-asr-ws-url: ${VIDEO_INTERVIEW_REALTIME_ASR_WS_URL:wss://dashscope.aliyuncs.com/api-ws/v1/realtime}
+    max-questions-per-session: ${VIDEO_INTERVIEW_MAX_QUESTIONS:20}
+    max-events-per-session: ${VIDEO_INTERVIEW_MAX_EVENTS:2000}
+    # 每轮作答后「导演衔接语」：与 TurnAgent 并行；关闭后仅跑评价链路
+    bridging-enabled: ${VIDEO_INTERVIEW_BRIDGING_ENABLED:true}
+    bridging-utterance-max-chars: ${VIDEO_INTERVIEW_BRIDGING_MAX_CHARS:800}
   audio:
     sample-rate: 16000
     frame-size: 800

@@ -9,6 +9,7 @@ MienMien 是一个社区驱动项目，独家商业化权利由 `王振` 保留�
 - 一键停止全部服务：`bash scripts/dev-down.sh`
 - B 端访问地址：`http://localhost:5173`
 - B 端功能与设计详解：`doc/business-web-b-end-guide.md`
+- 视频 / 语音模拟面试（架构与数据流）：`doc/business-web-b-end-guide.md` 第 6.8 节
 
 ## 产品理想
 
@@ -80,7 +81,7 @@ PR 合并前必须通过 `sdd-gate` 检查，否则无法合并。
 - Node.js 20+
 - **MySQL**：数据库名固定为 **`MienMieApp`**（utf8mb4）
   - **本机 MySQL**：安装后执行 `CREATE DATABASE IF NOT EXISTS MienMieApp ...`（或直接跑种子脚本，内含建库语句）
-  - **Docker（可选）**：安装 Docker Desktop（含 **Compose 插件**），由 [`docker-compose.yml`](docker-compose.yml) 启动 `mysql:8.4`，默认端口 `3306`，root 密码默认 `root`（可用环境变量 `DB_PASSWORD` 覆盖）。若仅有 `docker` CLI 而无 `docker compose`，可安装独立的 `docker-compose` v1，或改用本机 MySQL。
+  - **Docker（推荐无本机 mysql 客户端时）**：安装 Docker Desktop（含 **Compose 插件**），由 [`docker-compose.yml`](docker-compose.yml) 启动 `mysql:8.4`，默认端口 `3306`，root 密码默认 `root`（可用环境变量 `DB_PASSWORD` 覆盖）。`dev-up` 会先执行 `dev-db-up`；若单独执行 `dev-seed.sh` 且本机无 `mysql` 命令，脚本会**尝试**先调用 `dev-db-up.sh` 拉起容器后再 `docker exec` 灌入种子 SQL。
 
 连接参数（与 Spring Boot 一致，均可通过环境变量覆盖）：
 
@@ -111,12 +112,21 @@ PR 合并前必须通过 `sdd-gate` 检查，否则无法合并。
    - 两者都会先跑 `dev-precheck`，再 `dev-db-up` 可选拉起 MySQL 容器，再 `dev-seed` 建表
 3. 待后端就绪后执行 `bash scripts/dev-check-jdk21.sh`（推荐）
    - 若你已手动设置好 `JAVA_HOME`，也可执行 `bash scripts/dev-check.sh`
+   - `dev-check` 从接口 JSON 取字段时：**优先 `node`**，未安装 Node 时可安装 **`jq`** 作为替代（见 `scripts/_dev_json.sh`）
 4. 打开 `http://localhost:5173`
+
+**Java 改代码后自动重启（热重启）**
+
+- `java/business` 与 `java/consumer` 已加入 **spring-boot-devtools**：`target/classes` 更新后会自动快速重启进程（无需手工杀端口再起 `mvn spring-boot:run`）。
+- 使用 **`bash scripts/dev-up.sh`** 或 **`bash scripts/dev-all-jdk21.sh`** 时：若本机已安装 **fswatch**（macOS 可执行 `brew install fswatch`），默认在后台监视各模块的 `src/main/java` 与 `src/main/resources`，文件保存后自动执行该模块的 **`mvn compile`**，从而触发上述热重启；日志见仓库根目录 `.business-watch.log`、`.consumer-watch.log`。
+- 不需要后台监视时（例如避免与 IDE 自带编译冲突）：`DEV_BACKEND_COMPILE_WATCH=0 bash scripts/dev-up.sh`
+- 未安装 fswatch 时：可另开终端在 `java/business` 或 `java/consumer` 下执行 **`mvn compile`**，同样会触发热重启。
+- 前端 **`npm run dev`** 为 Vite HMR，保存 `.vue`/`.js` 后一般无需整站重启。
 
 停止步骤：
 
 - 执行 `bash scripts/dev-down.sh`（停止由 dev-up 拉起的 Java/Web 进程）
-- 若需同时停止 MySQL 容器：`DEV_STOP_DB=1 bash scripts/dev-down.sh`
+- 若需同时停止 MySQL 容器：`DEV_STOP_DB=1 bash scripts/dev-down.sh`（与计划文档中的 **`DEV_DOWN_DOCKER=1` 等价**，二者任一为 `1` 即会尝试 `docker compose stop mysql`）
 - 查看当前运行状态：`bash scripts/dev-status.sh`
 - 查看最近一次一键执行报告：`bash scripts/dev-report.sh`
 

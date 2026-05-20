@@ -65,14 +65,24 @@ CREATE TABLE IF NOT EXISTS mm_resume_document_space (
 
 CREATE TABLE IF NOT EXISTS mm_job_position (
   position_id VARCHAR(64) NOT NULL PRIMARY KEY,
-  space_id VARCHAR(64) NOT NULL,
+  user_id VARCHAR(64) NOT NULL DEFAULT '',
+  space_id VARCHAR(64) NULL DEFAULT NULL,
   title VARCHAR(256) NOT NULL,
   company VARCHAR(256) NOT NULL DEFAULT '',
   location VARCHAR(256) NOT NULL DEFAULT '',
-  base_range VARCHAR(8000) NOT NULL DEFAULT '',
+  base_range LONGTEXT NOT NULL,
   status VARCHAR(32) NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS mm_job_position_space (
+  position_id VARCHAR(64) NOT NULL,
+  space_id VARCHAR(64) NOT NULL,
+  PRIMARY KEY (position_id, space_id),
+  KEY idx_jps_space (space_id),
+  CONSTRAINT fk_jps_position FOREIGN KEY (position_id) REFERENCES mm_job_position (position_id) ON DELETE CASCADE,
+  CONSTRAINT fk_jps_space FOREIGN KEY (space_id) REFERENCES mm_space (space_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS mm_jd_target (
@@ -105,8 +115,39 @@ CREATE TABLE IF NOT EXISTS mm_interview_record (
   interview_type VARCHAR(32) NOT NULL,
   score INT NOT NULL,
   result VARCHAR(32) NOT NULL,
-  summary TEXT NOT NULL,
+  summary MEDIUMTEXT NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS mm_interview_record_job (
+  record_id VARCHAR(64) NOT NULL PRIMARY KEY,
+  position_id VARCHAR(64) NOT NULL,
+  CONSTRAINT fk_irj_record FOREIGN KEY (record_id) REFERENCES mm_interview_record (record_id) ON DELETE CASCADE,
+  CONSTRAINT fk_irj_position FOREIGN KEY (position_id) REFERENCES mm_job_position (position_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS mm_user_interviewer_style (
+  style_id VARCHAR(64) NOT NULL PRIMARY KEY,
+  user_id VARCHAR(64) NOT NULL,
+  title VARCHAR(256) NOT NULL,
+  prompt_body LONGTEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_uis_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS mm_user_interviewer_role (
+  role_id VARCHAR(64) NOT NULL PRIMARY KEY,
+  user_id VARCHAR(64) NOT NULL,
+  role_code VARCHAR(64) NOT NULL,
+  role_name VARCHAR(256) NOT NULL,
+  interview_content LONGTEXT NOT NULL,
+  focus_points LONGTEXT NOT NULL,
+  evaluation_hint LONGTEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_uir_user_code (user_id, role_code),
+  KEY idx_uir_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS mm_ai_model_config (
@@ -143,6 +184,43 @@ CREATE TABLE IF NOT EXISTS mm_answer_stream (
   question_event_id VARCHAR(64) NULL,
   final_answer TEXT NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS mm_video_interview_session (
+  session_id VARCHAR(64) NOT NULL PRIMARY KEY,
+  user_id VARCHAR(64) NOT NULL,
+  space_id VARCHAR(64) NOT NULL,
+  business_record_id VARCHAR(64) NOT NULL,
+  position_id VARCHAR(64) NULL,
+  round_index INT NOT NULL DEFAULT 0,
+  style_key VARCHAR(128) NOT NULL DEFAULT '',
+  status VARCHAR(32) NOT NULL,
+  epoch BIGINT NOT NULL DEFAULT 0,
+  last_event_seq BIGINT NOT NULL DEFAULT 0,
+  resume_snapshot_json LONGTEXT NOT NULL,
+  job_snapshot_json LONGTEXT NOT NULL,
+  style_prompt_snapshot LONGTEXT NOT NULL,
+  orchestrator_model VARCHAR(128) NOT NULL DEFAULT '',
+  asr_model VARCHAR(128) NOT NULL DEFAULT '',
+  started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ended_at TIMESTAMP NULL DEFAULT NULL,
+  KEY idx_video_session_space (space_id),
+  KEY idx_video_session_user (user_id),
+  KEY idx_video_session_record (business_record_id),
+  CONSTRAINT fk_video_session_space FOREIGN KEY (space_id) REFERENCES mm_space (space_id),
+  CONSTRAINT fk_video_session_record FOREIGN KEY (business_record_id) REFERENCES mm_interview_record (record_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS mm_video_interview_event (
+  event_id VARCHAR(64) NOT NULL PRIMARY KEY,
+  session_id VARCHAR(64) NOT NULL,
+  seq BIGINT NOT NULL,
+  type VARCHAR(48) NOT NULL,
+  payload_json LONGTEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_video_event_session_seq (session_id, seq),
+  KEY idx_video_event_session (session_id),
+  CONSTRAINT fk_video_event_session FOREIGN KEY (session_id) REFERENCES mm_video_interview_session (session_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 SET @col_space_deleted_at_exists = (

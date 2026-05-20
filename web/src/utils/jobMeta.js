@@ -52,3 +52,57 @@ export function jobTypeLabel(jobType) {
   const m = { fulltime: "全职", campus: "校招", intern: "实习" };
   return m[jobType] || "全职";
 }
+
+/** 从模型返回文本中提取 JSON 对象（支持裸 JSON、```json 围栏、或正文中的第一段 {...}）。 */
+export function extractAssistantJsonObject(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const tryParse = (s) => {
+    try {
+      return JSON.parse(String(s).trim());
+    } catch {
+      return null;
+    }
+  };
+  let o = tryParse(raw);
+  if (o && typeof o === "object" && !Array.isArray(o)) return o;
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) {
+    o = tryParse(fence[1]);
+    if (o && typeof o === "object" && !Array.isArray(o)) return o;
+  }
+  const i = raw.indexOf("{");
+  const j = raw.lastIndexOf("}");
+  if (i >= 0 && j > i) {
+    o = tryParse(raw.slice(i, j + 1));
+    if (o && typeof o === "object" && !Array.isArray(o)) return o;
+  }
+  return null;
+}
+
+/** 解析结果中的岗位类型 → fulltime | campus | intern */
+export function normalizeParsedJobType(v) {
+  const s = String(v || "")
+    .trim()
+    .toLowerCase();
+  if (s === "campus" || s === "校招") return "campus";
+  if (s === "intern" || s === "实习") return "intern";
+  if (s === "fulltime" || s === "全职") return "fulltime";
+  return "fulltime";
+}
+
+/** 将粘贴的纯文本 JD 存为简单 HTML（段落），供 base_range JSON 中的 jdDetail 入库。 */
+export function jdPlainToSimpleHtml(plain) {
+  const t = plain == null ? "" : String(plain);
+  if (!t.trim()) return "";
+  const esc = (s) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  return t
+    .split(/\r?\n/)
+    .map((line) => (line.trim() === "" ? "<br/>" : `<p>${esc(line)}</p>`))
+    .join("");
+}

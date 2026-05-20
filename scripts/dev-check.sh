@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/_dev_json.sh"
+
 echo "[check] health endpoints"
-curl -fsS http://localhost:8080/actuator/health >/dev/null
-curl -fsS http://localhost:8081/actuator/health >/dev/null
+curl -fsS --max-time 15 http://localhost:8080/actuator/health >/dev/null
+curl -fsS --max-time 15 http://localhost:8081/actuator/health >/dev/null
 
 echo "[check] business login (seed: 13800138000 / dev123456)"
-LOGIN_JSON="$(curl -fsS -X POST http://localhost:8080/api/v1/business/auth/login -H "Content-Type: application/json" -d '{"phone":"13800138000","password":"dev123456"}')"
-TOKEN="$(printf '%s' "$LOGIN_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.sessionToken || '');")"
+LOGIN_JSON="$(curl -fsS --max-time 20 -X POST http://localhost:8080/api/v1/business/auth/login -H "Content-Type: application/json" -d '{"phone":"13800138000","password":"dev123456"}')"
+TOKEN="$(printf '%s' "$LOGIN_JSON" | dev_json_string_field sessionToken)"
 if [[ -z "$TOKEN" ]]; then
   echo "login failed, no sessionToken"
   echo "$LOGIN_JSON"
@@ -16,56 +20,56 @@ fi
 BIZ_AUTH=( -H "Authorization: Bearer $TOKEN" )
 
 echo "[check] create space"
-SPACE_JSON="$(curl -fsS -X POST http://localhost:8080/api/v1/business/spaces -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"全量验收空间"}')"
+SPACE_JSON="$(curl -fsS --max-time 30 -X POST http://localhost:8080/api/v1/business/spaces -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"全量验收空间"}')"
 echo "$SPACE_JSON"
-SPACE_ID="$(printf '%s' "$SPACE_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.spaceId);")"
+SPACE_ID="$(printf '%s' "$SPACE_JSON" | dev_json_string_field spaceId)"
 
 echo "[check] B resume / jd / interview smoke"
-curl -fsS -X POST "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
+curl -fsS --max-time 30 -X POST "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
   -d '{"name":"验收简历","modules":[{"id":"m1","title":"模块1","text":"hello"}]}' >/dev/null
-curl -fsS "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" "${BIZ_AUTH[@]}" >/dev/null
-curl -fsS "http://localhost:8080/api/v1/business/resume-documents" "${BIZ_AUTH[@]}" >/dev/null
-curl -fsS -X POST http://localhost:8080/api/v1/business/jd-targets -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
+curl -fsS --max-time 30 "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS --max-time 30 "http://localhost:8080/api/v1/business/resume-documents" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS --max-time 30 -X POST http://localhost:8080/api/v1/business/jd-targets -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
   -d "{\"spaceId\":\"$SPACE_ID\",\"rawText\":\"jd\",\"focusPoints\":\"fp\"}" >/dev/null
-curl -fsS "http://localhost:8080/api/v1/business/jd-targets/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
-curl -fsS -X POST "http://localhost:8080/api/v1/business/interviews/mock" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
+curl -fsS --max-time 30 "http://localhost:8080/api/v1/business/jd-targets/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS --max-time 30 -X POST "http://localhost:8080/api/v1/business/interviews/mock" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
   -d "{\"spaceId\":\"$SPACE_ID\"}" >/dev/null
-curl -fsS -X POST "http://localhost:8080/api/v1/business/interviews/real" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
+curl -fsS --max-time 30 -X POST "http://localhost:8080/api/v1/business/interviews/real" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
   -d "{\"spaceId\":\"$SPACE_ID\"}" >/dev/null
-curl -fsS "http://localhost:8080/api/v1/business/interviews/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS --max-time 30 "http://localhost:8080/api/v1/business/interviews/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
 
 echo "[check] rename space"
-curl -fsS -X PUT "http://localhost:8080/api/v1/business/spaces/$SPACE_ID" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"重命名验收空间"}' >/dev/null
+curl -fsS --max-time 30 -X PUT "http://localhost:8080/api/v1/business/spaces/$SPACE_ID" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"重命名验收空间"}' >/dev/null
 
 echo "[check] delete empty space -> 200"
-EMPTY_SPACE_JSON="$(curl -fsS -X POST http://localhost:8080/api/v1/business/spaces -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"待删除空间"}')"
-EMPTY_SPACE_ID="$(printf '%s' "$EMPTY_SPACE_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.spaceId);")"
-curl -fsS -X DELETE "http://localhost:8080/api/v1/business/spaces/$EMPTY_SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
-curl -fsS -X DELETE "http://localhost:8080/api/v1/business/spaces/$EMPTY_SPACE_ID/hard" "${BIZ_AUTH[@]}" >/dev/null
+EMPTY_SPACE_JSON="$(curl -fsS --max-time 30 -X POST http://localhost:8080/api/v1/business/spaces -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"待删除空间"}')"
+EMPTY_SPACE_ID="$(printf '%s' "$EMPTY_SPACE_JSON" | dev_json_string_field spaceId)"
+curl -fsS --max-time 30 -X DELETE "http://localhost:8080/api/v1/business/spaces/$EMPTY_SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS --max-time 30 -X DELETE "http://localhost:8080/api/v1/business/spaces/$EMPTY_SPACE_ID/hard" "${BIZ_AUTH[@]}" >/dev/null
 
 echo "[check] job positions"
-JP_JSON="$(curl -fsS -X POST http://localhost:8080/api/v1/business/job-positions -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d "{\"spaceId\":\"$SPACE_ID\",\"title\":\"后端工程师\",\"company\":\"Acme\",\"location\":\"上海\",\"baseRange\":\"30-50K\"}")"
+JP_JSON="$(curl -fsS --max-time 30 -X POST http://localhost:8080/api/v1/business/job-positions -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d "{\"spaceId\":\"$SPACE_ID\",\"title\":\"后端工程师\",\"company\":\"Acme\",\"location\":\"上海\",\"baseRange\":\"30-50K\"}")"
 echo "$JP_JSON"
-JP_ID="$(printf '%s' "$JP_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.positionId);")"
-curl -fsS "http://localhost:8080/api/v1/business/job-positions/by-space/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
-curl -fsS -X DELETE "http://localhost:8080/api/v1/business/job-positions/item/$JP_ID" "${BIZ_AUTH[@]}" >/dev/null
+JP_ID="$(printf '%s' "$JP_JSON" | dev_json_string_field positionId)"
+curl -fsS --max-time 30 "http://localhost:8080/api/v1/business/job-positions/by-space/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS --max-time 30 -X DELETE "http://localhost:8080/api/v1/business/job-positions/item/$JP_ID" "${BIZ_AUTH[@]}" >/dev/null
 
 echo "[check] standard answer bank"
-curl -fsS -X PUT http://localhost:8080/api/v1/business/answer-banks -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
+curl -fsS --max-time 30 -X PUT http://localhost:8080/api/v1/business/answer-banks -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
   -d "{\"spaceId\":\"$SPACE_ID\",\"intro\":\"i\",\"reason\":\"r\",\"strengths\":\"s\",\"project\":\"p\",\"hr\":\"h\"}" >/dev/null
-curl -fsS "http://localhost:8080/api/v1/business/answer-banks/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
+curl -fsS --max-time 30 "http://localhost:8080/api/v1/business/answer-banks/$SPACE_ID" "${BIZ_AUTH[@]}" >/dev/null
 
 echo "[check] resume document update"
-RD_JSON="$(curl -fsS -X POST "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"版本二","modules":[{"id":"x1","title":"A","text":"a"}]}')"
-RD_ID="$(printf '%s' "$RD_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.resumeId);")"
-curl -fsS -X PUT "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents/$RD_ID" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
+RD_JSON="$(curl -fsS --max-time 30 -X POST "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" -d '{"name":"版本二","modules":[{"id":"x1","title":"A","text":"a"}]}')"
+RD_ID="$(printf '%s' "$RD_JSON" | dev_json_string_field resumeId)"
+curl -fsS --max-time 30 -X PUT "http://localhost:8080/api/v1/business/spaces/$SPACE_ID/resume-documents/$RD_ID" -H "Content-Type: application/json" "${BIZ_AUTH[@]}" \
   -d '{"name":"版本二改","modules":[{"id":"x1","title":"A","text":"b"}]}' >/dev/null
 
 echo "[check] consumer stream health"
-curl -fsS http://localhost:8081/api/v1/consumer/health/stream >/dev/null
+curl -fsS --max-time 20 http://localhost:8081/api/v1/consumer/health/stream >/dev/null
 
 echo "[check] invalid consumer mode -> 400"
-BAD_CODE="$(curl -s -o /tmp/mm-bad-mode.json -w "%{http_code}" -X POST http://localhost:8081/api/v1/consumer/sessions -H "Content-Type: application/json" -d '{"userId":"user_001","mode":"invalid"}')"
+BAD_CODE="$(curl -s --max-time 15 -o /tmp/mm-bad-mode.json -w "%{http_code}" -X POST http://localhost:8081/api/v1/consumer/sessions -H "Content-Type: application/json" -d '{"userId":"user_001","mode":"invalid"}')"
 if [[ "$BAD_CODE" != "400" ]]; then
   echo "expected HTTP 400 for invalid mode, got $BAD_CODE"
   cat /tmp/mm-bad-mode.json || true
@@ -73,12 +77,12 @@ if [[ "$BAD_CODE" != "400" ]]; then
 fi
 
 echo "[check] create session"
-SESSION_JSON="$(curl -fsS -X POST http://localhost:8081/api/v1/consumer/sessions -H "Content-Type: application/json" -d '{"userId":"user_001","mode":"live"}')"
+SESSION_JSON="$(curl -fsS --max-time 30 -X POST http://localhost:8081/api/v1/consumer/sessions -H "Content-Type: application/json" -d '{"userId":"user_001","mode":"live"}')"
 echo "$SESSION_JSON"
-SESSION_ID="$(printf '%s' "$SESSION_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.sessionId);")"
+SESSION_ID="$(printf '%s' "$SESSION_JSON" | dev_json_string_field sessionId)"
 
 echo "[check] unknown session text event -> 404"
-U_CODE="$(curl -s -o /tmp/mm-unknown-sess.json -w "%{http_code}" -X POST "http://localhost:8081/api/v1/consumer/sessions/gs_nonexistent_zzzz/events/text" -H "Content-Type: application/json" -d '{"questionText":"hi"}')"
+U_CODE="$(curl -s --max-time 15 -o /tmp/mm-unknown-sess.json -w "%{http_code}" -X POST "http://localhost:8081/api/v1/consumer/sessions/gs_nonexistent_zzzz/events/text" -H "Content-Type: application/json" -d '{"questionText":"hi"}')"
 if [[ "$U_CODE" != "404" ]]; then
   echo "expected HTTP 404 for unknown session, got $U_CODE"
   cat /tmp/mm-unknown-sess.json || true
@@ -86,19 +90,19 @@ if [[ "$U_CODE" != "404" ]]; then
 fi
 
 echo "[check] voice event"
-curl -fsS -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/events/voice" -H "Content-Type: application/json" -d '{"questionText":"请做一个自我介绍"}'
+curl -fsS --max-time 60 -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/events/voice" -H "Content-Type: application/json" -d '{"questionText":"请做一个自我介绍"}'
 
 echo "[check] photo event"
-curl -fsS -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/events/photo" -H "Content-Type: application/json" -d '{"questionText":"图片相关问题"}'
+curl -fsS --max-time 60 -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/events/photo" -H "Content-Type: application/json" -d '{"questionText":"图片相关问题"}'
 
 echo "[check] text event"
-curl -fsS -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/events/text" -H "Content-Type: application/json" -d '{"questionText":"手写补充问题"}'
+curl -fsS --max-time 60 -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/events/text" -H "Content-Type: application/json" -d '{"questionText":"手写补充问题"}'
 
 echo "[check] photo-qa"
-curl -fsS "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/photo-qa"
+curl -fsS --max-time 60 "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/photo-qa"
 
 echo "[check] answers once"
-curl -fsS "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/answers/once"
+curl -fsS --max-time 120 "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/answers/once"
 
 echo "[check] sse stream (max 8s) assert events"
 SSE_OUT="$(curl -fsS -N --max-time 8 -H "Accept: text/event-stream" "http://localhost:8081/api/v1/consumer/sessions/$SESSION_ID/answers/stream" || true)"
@@ -113,10 +117,10 @@ if ! grep -qE '^event:(done|fallback)' /tmp/mm-sse.out; then
 fi
 
 echo "[check] session end + blocked text -> 409"
-SESSION2_JSON="$(curl -fsS -X POST http://localhost:8081/api/v1/consumer/sessions -H "Content-Type: application/json" -d '{"userId":"user_001","mode":"live"}')"
-SESSION2_ID="$(printf '%s' "$SESSION2_JSON" | node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync(0,'utf8')); console.log(d.sessionId);")"
-curl -fsS -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION2_ID/end"
-E_CODE="$(curl -s -o /tmp/mm-after-end.json -w "%{http_code}" -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION2_ID/events/text" -H "Content-Type: application/json" -d '{"questionText":"不应成功"}')"
+SESSION2_JSON="$(curl -fsS --max-time 30 -X POST http://localhost:8081/api/v1/consumer/sessions -H "Content-Type: application/json" -d '{"userId":"user_001","mode":"live"}')"
+SESSION2_ID="$(printf '%s' "$SESSION2_JSON" | dev_json_string_field sessionId)"
+curl -fsS --max-time 20 -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION2_ID/end"
+E_CODE="$(curl -s --max-time 15 -o /tmp/mm-after-end.json -w "%{http_code}" -X POST "http://localhost:8081/api/v1/consumer/sessions/$SESSION2_ID/events/text" -H "Content-Type: application/json" -d '{"questionText":"不应成功"}')"
 if [[ "$E_CODE" != "409" ]]; then
   echo "expected HTTP 409 after session end, got $E_CODE"
   cat /tmp/mm-after-end.json || true

@@ -15,6 +15,15 @@ if [[ ! -f "$SQL_FILE" ]]; then
   exit 1
 fi
 
+if ! command -v mysql >/dev/null 2>&1; then
+  if command -v docker >/dev/null 2>&1; then
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$DOCKER_CONTAINER"; then
+      echo "[dev-seed] 未检测到 mysql 客户端，且容器未运行，尝试 bash scripts/dev-db-up.sh ..."
+      bash "$ROOT_DIR/scripts/dev-db-up.sh" || true
+    fi
+  fi
+fi
+
 run_mysql_local() {
   local -a args=(-h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER")
   if [[ -n "${DB_PASSWORD:-}" ]]; then

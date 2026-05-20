@@ -1,4 +1,5 @@
 const BIZ = "http://localhost:8080/api/v1/business";
+const CONSUMER = import.meta.env?.VITE_CONSUMER_BASE_URL || "http://localhost:8081";
 
 export const USER_SESSION_STORAGE_KEY = "mienmien.user.session.v1";
 
@@ -57,6 +58,46 @@ async function fetchJson(url, options = {}) {
         /* ignore */
       }
     }
+    throw new Error(data.message || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+async function fetchConsumerJson(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  const isFormData =
+    typeof FormData !== "undefined" && options.body != null && options.body instanceof FormData;
+  if (options.body != null && !isFormData && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const token = readSessionToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  let res;
+  try {
+    res = await fetch(url, { ...options, headers });
+  } catch (e) {
+    const msg = typeof e?.message === "string" ? e.message : "";
+    const looksNetwork =
+      e instanceof TypeError || msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("Load failed");
+    if (looksNetwork) {
+      throw new Error(
+        "无法连接 consumer 服务。请在本机启动 consumer（默认端口 8081），并设置 VITE_CONSUMER_BASE_URL 后重试。"
+      );
+    }
+    throw e;
+  }
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = {};
+    }
+  }
+  if (!res.ok) {
     throw new Error(data.message || `HTTP ${res.status}`);
   }
   return data;
@@ -206,8 +247,105 @@ export async function createInterview(type, payload) {
   });
 }
 
+export async function updateInterview(recordId, payload) {
+  return fetchJson(`${BIZ}/interviews/records/${encodeURIComponent(recordId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
 export async function listInterview(spaceId) {
-  return fetchJson(`${BIZ}/interviews/${spaceId}`);
+  const data = await fetchJson(`${BIZ}/interviews/${encodeURIComponent(spaceId)}`);
+  return Array.isArray(data) ? data : [];
+}
+
+export async function createVideoInterviewSession(recordId, payload) {
+  return fetchJson(`${BIZ}/interviews/records/${encodeURIComponent(recordId)}/video-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function listVideoInterviewEvents(sessionId) {
+  return fetchConsumerJson(
+    `${CONSUMER}/api/v1/consumer/video-interview/sessions/${encodeURIComponent(sessionId)}/events`
+  );
+}
+
+export async function listVideoInterviewTurns(sessionId) {
+  return fetchConsumerJson(
+    `${CONSUMER}/api/v1/consumer/video-interview/sessions/${encodeURIComponent(sessionId)}/turns`
+  );
+}
+
+/**
+ * 视频面试句末整段转写：上传 WAV（推荐单声道）到 consumer，由服务端调用百炼 Qwen-ASR。
+ * @param {string} sessionId
+ * @param {Blob} wavBlob
+ */
+export async function transcribeVideoInterviewAudio(sessionId, wavBlob) {
+  const url = `${CONSUMER}/api/v1/consumer/video-interview/sessions/${encodeURIComponent(sessionId)}/asr/transcribe`;
+  const body = new FormData();
+  body.append("file", wavBlob, "utterance.wav");
+  return fetchConsumerJson(url, { method: "POST", body });
+}
+
+export async function parseJobPositionJd(rawText) {
+  return fetchJson(`${BIZ}/jd-targets/parse-job-position`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rawText })
+  });
+}
+
+/**
+ * 上传岗位 JD 截图，服务端用系统设置中的多模态模型解析（OpenAI 兼容 chat/completions；模型名以控制台为准，如 qwen3.5-plus）。
+ */
+export async function parseJobPositionFromImage(file) {
+  const url = `${BIZ}/jd-targets/parse-job-position-image`;
+  const headers = new Headers();
+  const token = readSessionToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const body = new FormData();
+  body.append("image", file);
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", headers, body });
+  } catch (e) {
+    const msg = typeof e?.message === "string" ? e.message : "";
+    const looksNetwork =
+      e instanceof TypeError || msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("Load failed");
+    if (looksNetwork) {
+      throw new Error(
+        "无法连接业务服务。请在本机启动 business（默认端口 8080），例如执行仓库根目录下的 `bash scripts/dev-all-jdk21.sh`，或单独启动 `java/business` 后再试。"
+      );
+    }
+    throw e;
+  }
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = {};
+    }
+  }
+  if (!res.ok) {
+    if (res.status === 401 && data?.code === "BUS-4010") {
+      try {
+        localStorage.removeItem(USER_SESSION_STORAGE_KEY);
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new Error(data.message || `HTTP ${res.status}`);
+  }
+  return data;
 }
 
 export async function createJobPosition(payload) {
@@ -301,6 +439,56 @@ export async function listDbInspectorTableRows(tableName, offset = 0, limit = 10
   return fetchJson(
     `${BIZ}/admin/db-inspector/tables/${encodeURIComponent(tableName)}/rows?${q.toString()}`
   );
+}
+
+export async function listInterviewerStyles() {
+  const data = await fetchJson(`${BIZ}/interviewer-styles`);
+  return Array.isArray(data) ? data : [];
+}
+
+export async function createInterviewerStyle(payload) {
+  return fetchJson(`${BIZ}/interviewer-styles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateInterviewerStyle(styleId, payload) {
+  return fetchJson(`${BIZ}/interviewer-styles/${encodeURIComponent(styleId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteInterviewerStyle(styleId) {
+  await fetchJson(`${BIZ}/interviewer-styles/${encodeURIComponent(styleId)}`, { method: "DELETE" });
+}
+
+export async function listInterviewerRoles() {
+  const data = await fetchJson(`${BIZ}/interviewer-roles`);
+  return Array.isArray(data) ? data : [];
+}
+
+export async function createInterviewerRole(payload) {
+  return fetchJson(`${BIZ}/interviewer-roles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateInterviewerRole(roleId, payload) {
+  return fetchJson(`${BIZ}/interviewer-roles/${encodeURIComponent(roleId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteInterviewerRole(roleId) {
+  await fetchJson(`${BIZ}/interviewer-roles/${encodeURIComponent(roleId)}`, { method: "DELETE" });
 }
 
 export async function registerByPhone(payload) {

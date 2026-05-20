@@ -62,7 +62,7 @@ B 端是面向「求职过程管理」的 **企业/个人工作台**：以 **空
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- **左侧 `sidebar`**：品牌区、**工作空间**；**可滚动区**内为 **「当前空间」**（标准题库 / 模拟面试 / 正式面试）、**「资源管理」**（简历管理 / 岗位管理；岗位为当前页时可显示「当前」角标）、**「系统功能」**（仪表盘 / 回收站 / 用户管理 / **系统设置**）。底部 **版权** 固定。
+- **左侧 `sidebar`**：品牌区、**工作空间**；**可滚动区**内为 **「当前空间」**（标准题库 / 模拟面试 / 正式面试）、**「资源管理」**（简历管理 / 岗位管理 / 空间管理；岗位为当前页时可显示「当前」角标）、**「面试管理」**（**面试官风格管理**、**全局声纹**：二者为**用户侧全局配置**，与「当前空间」下 **模拟面试 / 正式面试** Tab 内的多轮流程面板配合；在面板中可 **开始视频面试**，进入全屏 **`VideoInterviewRoom`**，详见 §6.8）、**「系统功能」**（仪表盘 / 回收站 / 用户管理 / **系统设置**）。底部 **版权** 固定。
 - **右侧 `main`**：**顶栏**（当前空间展示、子模块标题、**AI** 快捷入口、删除当前空间、已登录用户摘要等）、**主内容区**（按 `activeTab` 渲染对应 `section`）。**退出登录** 仅在 **「用户管理」** Tab 内提供（与 `logoutSession` 一致）。
 - **全局遮罩**：新增/重命名空间弹窗、**登录/注册**弹窗（未登录强制出现，除非在用户页「使用其他账号」流程中临时抑制）。
 
@@ -153,6 +153,7 @@ B 端是面向「求职过程管理」的 **企业/个人工作台**：以 **空
 
 - **岗位列表与弹窗**：卡片展示活跃岗位（类型标签：全职 / 校招 / 实习）；**添加/编辑** 使用 `max-w-2xl` 模态框（可拖拽标题区、未保存关闭确认、Toast 反馈）。扩展字段（类型、描述、JD 富文本、薪资备注）序列化进后端 `base_range` 的 JSON（`v:1`），历史纯文本 `base_range` 仍视为薪资/备注。**数据库**需执行 `scripts/migrate-mm-job-position-base-range-expand.sql` 将 `base_range` 扩至 `VARCHAR(8000)`，否则长 JD 可能保存失败。
 - **与空间**：`POST /job-positions`（`createJobPosition`）的 body 中 **`spaceId` 可选**；有值则校验空间归属并写入关联，无值则创建不绑定任何空间的岗位（进程内存储实现下仍支持多空间 **link**）。
+- **JD 一键解析岗位字段**：添加/编辑弹窗内粘贴 JD 后点击「一键解析岗位信息」→ **`POST /jd-targets/parse-job-position`**（`parseJobPositionJd`，与 `POST /job-positions/parse-jd` 等价），服务端用当前用户在**系统设置**中保存的模型调用大模型，要求返回固定键的 JSON，响应体即结构化字段；前端仅映射到表单与 `encodeJobBaseRange`（`jdDetail` 仍由前端将原文转为简单 HTML 入库）。
 - **与 `jobForm` 同步**：`jobForm` 与 **首条活跃岗位** 同步；在保存 **模拟/正式面试** 等流程前会将档案中的公司/地点写回 `jobForm`，再调用 `upsertPrimaryJobFromForm` 对首条岗位 **PUT 更新** 或 **POST 创建**（依赖当前空间时才会写入带 `spaceId` 的创建）。
 - **岗位 JD 与考点**（同页下方）：`jdEditor`；一键拆解、新增 JD、`listJd` 列表不变。
 
@@ -188,6 +189,68 @@ B 端是面向「求职过程管理」的 **企业/个人工作台**：以 **空
 
 - 展示 `recycleBinSpaces`；操作 **还原** 指定空间。
 - 与侧栏「系统功能」中的 **回收站** 入口一致，数据同源。
+
+### 6.8 视频 / 语音模拟面试（定稿架构）
+
+本节描述 B 端 **全屏视频面试间** 的产品形态与端到端数据流，与 `web/src/components/VideoInterviewRoom.vue`、`java/business` 建会话、`java/consumer` WebSocket 运行时对齐。
+
+#### 6.8.1 产品形态
+
+- **语音作答（固定链路）**：麦克风 + **VAD 句末静音** → **本机 Whisper WASM** 整段转写 → WebSocket 上送；**不提供** Web Speech、**不提供**手动文字替代输入，以保证各地网络环境下行为一致。
+- **虚拟形象视频**：左侧为 **本地循环素材**（`<video>`，默认 `public/virtual-avatar/`，可由会话字段覆盖）；**不采集、不展示候选人真实摄像头画面**，**不上传会议或候选人视频流**。
+- **浏览器 TTS**：面试官提问由本页朗读；朗读期间 **暂停句内录音**，避免扬声器串音进作答音轨（正式产品设计）。
+- **全局声纹（能量轮廓）**：模板与开关在侧栏 **面试管理 → 全局声纹** 配置；开启且已录模板时，句末按能量相似度峰值做门控，不足则丢弃本句转写。面试间仅只读展示实时相似度。
+
+#### 6.8.2 入口与前置条件
+
+- 在 **模拟面试** 或 **正式面试** Tab 中，完成多轮流程配置后，面板内提供 **开始视频面试**（全屏 `VideoInterviewRoom`）。
+- **面试官风格**：与流程中选择的 `interviewerStyleKey` 对齐；服务端使用该风格对应的 Prompt 快照驱动大模型（见建会话响应字段）。
+- **全局声纹**：仅 **能量轮廓** 一轨；模板与门控开关在侧栏 **面试管理 → 全局声纹** 配置，本机各语音面试间共用只读展示。
+
+#### 6.8.3 数据流（business → consumer → Web）
+
+1. **建会话**：前端调用 `POST .../interviews/records/{recordId}/video-sessions`（`createVideoInterviewSession`），`java/business` 创建会话并返回 **`sessionId`**、**`consumerHttpBaseUrl`**、**`videoInterviewWebSocketPath`**、**`interviewerStyleKey`**、虚拟形象 URL 等。
+2. **WebSocket**：`VideoInterviewRoom` 使用返回的 **consumer** 基址与路径连接 **`java/consumer`**；携带业务会话令牌以鉴权。
+3. **上行（示例）**：`vad_end`、`transcript_final`（句末 Whisper 结果）、`user_turn_commit`、`end_interview`、可选 **`audio_pcm16_base64`** 等；由 consumer 侧 **`VideoInterviewRuntimeService`**（及导演编排）消费。
+4. **下行（示例）**：`speak`（待朗读文案）、`state`（状态机）、`model_turn`（结构化判停 + 导演结果）、`ended` 等；前端驱动 TTS、FSM 展示与时间线调试视图。
+5. **事件落库**：会话内事件可由 consumer 持久化；前端调试可用 `listVideoInterviewEvents` 拉取时间线（经 consumer HTTP）。
+
+#### 6.8.4 与「系统设置 / 百炼」的关系
+
+- **系统设置** 中保存的百炼 **`Base URL` / `API Key` / `modelName`** 为 **登录用户级**（见 §6.6），用于 JD 解析、直连补全等 **business** 能力。
+- **视频面试的导演与对话模型** 运行在 **`java/consumer`**，依赖部署环境中的 **模型与连接配置**（与浏览器内百炼直连解耦）；一期不承诺将导演全部迁到浏览器或单一配置入口合并。
+
+#### 6.8.5 演进占位（非一期承诺）
+
+- 企业级 ASR、服务端声纹、数字人 / WebRTC、真多路视频等可作为后续能力；当前仓库以 **语音 + 本地虚拟素材 + consumer 导演** 为定稿边界。
+
+```mermaid
+flowchart LR
+  subgraph web [Web_VideoInterviewRoom]
+    Mic[VAD_麦克风]
+    ASR[Whisper_WASM_句末]
+    TTS[浏览器_TTS]
+    Avatar[虚拟形象视频]
+    WSClient[WebSocket]
+  end
+  subgraph biz [java_business]
+    CreateSession[POST_video_session]
+  end
+  subgraph cons [java_consumer]
+    WSH[VideoInterview_WS]
+    Director[导演与模型]
+    Events[事件存储]
+  end
+  CreateSession --> WSClient
+  WSClient --> WSH
+  Mic --> ASR
+  ASR --> WSClient
+  WSClient --> Director
+  Director --> WSClient
+  WSH --> Events
+  WSClient --> TTS
+  WSClient --> Avatar
+```
 
 ---
 
@@ -250,9 +313,12 @@ B 端是面向「求职过程管理」的 **企业/个人工作台**：以 **空
 | POST | `/jd-targets` | `createJd` | 岗位页「新增 JD」；body：`{ spaceId, rawText, focusPoints }` |
 | GET | `/jd-targets/{spaceId}` | `listJd` | 岗位 Tab `loadSpaceData` |
 | POST | `/jd-targets/analyze` | `analyzeJdFocusPoints` | 岗位页一键拆解；body：`{ rawText }` |
+| POST | `/jd-targets/parse-job-position` | `parseJobPositionJd` | 与 `/job-positions/parse-jd` 等价：服务端解析 JD → 岗位字段 JSON；body：`{ rawText }` |
 | POST | `/interviews/{type}` | `createInterview` | `type` 为 **`mock`** 或 **`real`**；body：`{ spaceId, round, interviewType, score, result, summary }` |
+| POST | `/interviews/records/{recordId}/video-sessions` | `createVideoInterviewSession` | 为指定面试记录创建 **视频面试会话**；body 含 `interviewerStyleKey` 等；响应含 `sessionId`、`consumerHttpBaseUrl`、`videoInterviewWebSocketPath` 等（见 §6.8） |
 | GET | `/interviews/{spaceId}` | `listInterview` | 模拟/正式面试 Tab 拉列表后水合 |
 | POST | `/job-positions` | `createJobPosition` | 新增岗位；body：`{ title, company, location, baseRange[, spaceId] }`，`spaceId` **可选**（有则校验并关联） |
+| POST | `/job-positions/parse-jd` | `parseJobPositionJd` | 服务端用当前用户已保存的模型配置解析 JD；body：`{ rawText }`；返回 `title, company, location, jobType, salary, focusPoints, description`（JSON） |
 | PUT | `/job-positions/item/{positionId}` | `updateJobPosition` | 编辑岗位 |
 | GET | `/job-positions` | `listAllJobPositions` | 岗位管理聚合列表（每岗一条，含 `spaceIds`） |
 | GET | `/job-positions/by-space/{spaceId}` | `listJobPositions` | 某空间下的岗位 |
@@ -278,8 +344,10 @@ B 端是面向「求职过程管理」的 **企业/个人工作台**：以 **空
 | 岗位 | `listAllJobPositions`、`listJobPositions`、`createJobPosition`、`updateJobPosition`、`closeJobPosition`、`linkJobToSpace`、`unlinkJobFromSpace`、`listJd`、`createJd`、`analyzeJdFocusPoints` |
 | 空间管理 | 聚合与绑定弹窗：`listAllResumeDocuments`、`listAllJobPositions`、`linkResumeToSpace`、`deleteResumeDocument`（解绑本空间）、`linkJobToSpace`、`unlinkJobFromSpace`；另依赖空间列表/各空间下资源等既有接口 |
 | 标准题库 | `getAnswerBank`、`saveAnswerBank`（在题库 Tab 内保存） |
-| 模拟面试 | `listInterview`、`createInterview('mock', …)`（保存流程内含 `upsertPrimaryJobFromForm` 等，依赖当前空间） |
-| 正式面试 | `listInterview`、`createInterview('real', …)`（同上） |
+| 模拟面试 | `listInterview`、`createInterview('mock', …)`（保存流程内含 `upsertPrimaryJobFromForm` 等，依赖当前空间）；多轮面板内 **`createVideoInterviewSession`** 启动视频面试间 |
+| 正式面试 | `listInterview`、`createInterview('real', …)`（同上）；视频面试间同上 |
+| 面试官风格管理 | 侧栏 Tab `interview-style-mgmt`；与面试草稿、视频会话中的 `interviewerStyleKey` 一致 |
+| 全局声纹 | 侧栏 Tab `interview-voiceprint-mgmt`（`GlobalVoiceprintSettings`）；**仅能量轮廓**模板与门控；`VideoInterviewRoom` 只读展示门控状态与实时相似度 |
 | 系统设置 | `getModelConfig`、`saveModelConfig`、`testModelConfig` |
 | 回收站 | `listRecycleBinSpaces`、`restoreSpace`（及可能的硬删 `deleteSpace`） |
 | 登录/注册（弹窗） | `registerByPhone`、`loginByPhone` |

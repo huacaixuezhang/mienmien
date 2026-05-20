@@ -2,6 +2,8 @@ web/node_modules/
 web/dist/
 web/.vite/
 .business.log
+.business-watch.log
+.consumer-watch.log
 .consumer.log
 .web.log
 .dev-pids

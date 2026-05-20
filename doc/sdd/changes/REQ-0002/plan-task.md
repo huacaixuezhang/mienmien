@@ -513,3 +513,20 @@
 
 - `java -version`：当前默认可能仍为 JDK19；需安装 JDK21 后执行 `mvn test` / `dev-up`。
 - `bash scripts/dev-check.sh`：需在 business(8080)+consumer(8081) 已启动且数据库已 seed 后执行（命令：`bash scripts/dev-seed.sh`）。
+
+## 全量联调与一键可用（续：脚本加固，2026-05-11）
+
+说明：外部「继续全量联调」计划原文针对 PostgreSQL/`psql`；本仓库已统一为 **MySQL + Docker**（`docker-compose.yml` 中 `mysql:8.4`），以下为实现**同等意图**的加固与实机证据。
+
+1. [`scripts/dev-seed.sh`](../../../../scripts/dev-seed.sh)：无本机 `mysql` 客户端且目标容器未运行时，先尝试执行 `dev-db-up.sh` 再 `docker exec` 灌库。
+2. [`scripts/dev-down.sh`](../../../../scripts/dev-down.sh)：`DEV_DOWN_DOCKER=1` 与 `DEV_STOP_DB=1` 等价，用于停止 Compose MySQL 服务。
+3. [`scripts/_dev_json.sh`](../../../../scripts/_dev_json.sh) + [`scripts/dev-check.sh`](../../../../scripts/dev-check.sh)：JSON 字段解析优先 `node`，其次 `jq`；各 `curl` 增加 `--max-time`，避免 macOS 无 GNU `timeout` 时长时间挂起。
+4. [`README.md`](../../../../README.md)：`DEV_DOWN_DOCKER`、`dev-seed` 自动拉起库、`dev-check` 解析依赖说明。
+
+**本轮 Agent 实机命令与结果**
+
+| 步骤 | 命令 | 结果 |
+|------|------|------|
+| 预检 | `bash scripts/dev-precheck.sh` | 输出「依赖检查通过。」exit 0 |
+| 启动 | `DEV_UP_SKIP_WEB=1 bash scripts/dev-up.sh` | `dev-db-up` 因环境无 `docker compose` 插件跳过；本机 `mysql` 执行 `dev-seed` 成功；business/consumer `nohup mvn spring-boot:run` 已拉起 |
+| 验收 | `bash scripts/dev-check.sh` | 健康检查、B 端冒烟、C 端会话/SSE/409 等全部通过，末行 `[check] DONE`，exit 0 |

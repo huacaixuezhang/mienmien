@@ -33,6 +33,7 @@
 - `ios-architecture-guideline.md`：iOS 架构规范（成熟模式）
 - `android-architecture-guideline.md`：Android 架构规范（成熟模式）
 - `web-architecture-guideline.md`：Web 架构规范（成熟模式）
+- `voice-interview-closing-agent.md`：语音模拟面试终局综合评价 Agent（Prompt、输出结构、题目权重与综合分公式）
 - `changes/`：按功能ID存放的独立 SDD 文档集
 - `templates/change-request.md`：范围变更申请模板
 - `templates/vision-requirements-template.md`：愿景与需求模板

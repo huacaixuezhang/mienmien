@@ -11,6 +11,8 @@ public record InterviewRecordResponse(
         int score,
         String result,
         String summary,
+        /** 绑定岗位 ID，无绑定时为 null */
+        String positionId,
         Instant createdAt
 ) {
 }

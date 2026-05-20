@@ -6,7 +6,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 @SpringBootApplication(scanBasePackages = "com.mienmien.consumer")
-@EnableConfigurationProperties(ConsumerRuntimeProperties.class)
+@EnableConfigurationProperties({ConsumerRuntimeProperties.class, com.mienmien.consumer.videointerview.config.VideoInterviewProperties.class})
 public class ConsumerApplication {
     public static void main(String[] args) {
         SpringApplication.run(ConsumerApplication.class, args);

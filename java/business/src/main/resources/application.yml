@@ -2,10 +2,14 @@ server:
   port: 8080
 
 spring:
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
   datasource:
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:MienMieApp}?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
     username: ${DB_USER:root}
-    password: ${DB_PASSWORD:}
+    password: ${DB_PASSWORD:root}
   jackson:
     serialization:
       write-dates-as-timestamps: false
@@ -17,7 +21,20 @@ management:
         include: health,info
 
 mienmien:
+  consumer:
+    public-base-url: ${CONSUMER_PUBLIC_BASE_URL:http://localhost:8081}
+  video-interview:
+    orchestrator-model: ${VIDEO_INTERVIEW_ORCHESTRATOR_MODEL:qwen-turbo}
+    asr-model: ${VIDEO_INTERVIEW_ASR_MODEL:client-web-speech}
   business:
+    # 为 true 时启动自检：岗位表（user_id / mm_job_position_space / base_range）、面试绑定表 mm_interview_record_job
+    schema:
+      auto-patch-job-position: ${AUTO_PATCH_JOB_SCHEMA:true}
+      auto-patch-interview-record-job: ${AUTO_PATCH_INTERVIEW_JOB_SCHEMA:true}
+      auto-patch-interview-record-summary-column: ${AUTO_PATCH_INTERVIEW_SUMMARY_COLUMN:true}
+      auto-patch-user-interviewer-style: ${AUTO_PATCH_USER_INTERVIEWER_STYLE:true}
+      auto-patch-user-interviewer-role: ${AUTO_PATCH_USER_INTERVIEWER_ROLE:true}
+      auto-patch-video-interview-session: ${AUTO_PATCH_VIDEO_INTERVIEW_SCHEMA:true}
     recycle:
       cleanup-cron: "0 30 3 * * *"
     jd-ai:

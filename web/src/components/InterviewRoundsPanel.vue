@@ -1,7 +1,20 @@
 <script setup>
-defineProps({
+import { assessmentToResultUi, defaultInterviewConclusion } from "../utils/interviewV3.js";
+import { BUILTIN_INTERVIEWER_ROLE_OPTIONS } from "../constants/interviewerRolePresets.js";
+
+const props = defineProps({
   jobProfile: { type: Object, required: true },
-  rounds: { type: Array, required: true }
+  rounds: { type: Array, required: true },
+  /** 内置 + 自定义面试官风格下拉选项 { value, label }[] */
+  styleOptions: { type: Array, default: () => [] },
+  /** 用户在后端维护的面试官角色卡片（用于提示与悬浮说明） */
+  interviewerRoleCatalog: { type: Array, default: () => [] },
+  /** 为 false 时不渲染「岗位信息」整块（仅保留面试流程），用于模拟面试详情只展示绑定岗位摘要时 */
+  showJobSection: { type: Boolean, default: true },
+  /** 是否展示「开始语音模拟面试」入口（由父级发起麦克风 + 转写 + AI 面试官） */
+  showVideoStartButton: { type: Boolean, default: false },
+  /** 业务 summary.meta.videoInterviewMeta：终局总评与会话 id（只读展示） */
+  recordVideoInterviewMeta: { type: Object, default: null }
 });
 
 const emit = defineEmits([
@@ -10,16 +23,44 @@ const emit = defineEmits([
   "remove-round",
   "add-question",
   "edit-question",
-  "remove-question"
+  "remove-question",
+  "start-video-interview"
 ]);
 
 function interviewerBadgeClass(role) {
   const s = String(role || "");
-  if (s === "HR") return "bg-blue-500";
-  if (s === "P" || s === "Peer") return "bg-emerald-500";
+  const u = s.toLowerCase();
+  if (s === "HR" || u === "hr") return "bg-blue-500";
+  if (s === "P" || s === "Peer" || u === "peer") return "bg-emerald-500";
+  if (u === "ld") return "bg-amber-600";
   if (s === "+1" || s.includes("+1")) return "bg-violet-500";
   if (s === "+2" || s.includes("+2")) return "bg-red-500";
   return "bg-gray-500";
+}
+
+function interviewerRoleTooltip(role) {
+  const code = String(role || "").trim();
+  if (!code) return "";
+  const fromApi = (props.interviewerRoleCatalog || []).find(
+    (x) => String(x?.roleCode || "").toLowerCase() === code.toLowerCase()
+  );
+  if (fromApi) {
+    const bits = [
+      fromApi.roleName,
+      fromApi.interviewContent ? `内容：${String(fromApi.interviewContent).slice(0, 160)}` : "",
+      fromApi.focusPoints ? `侧重：${String(fromApi.focusPoints).slice(0, 160)}` : ""
+    ].filter(Boolean);
+    return bits.join("\n");
+  }
+  const presetKey = code.toLowerCase() === "p" ? "peer" : code.toLowerCase();
+  const preset = BUILTIN_INTERVIEWER_ROLE_OPTIONS.find((x) => x.code.toLowerCase() === presetKey);
+  if (!preset) return "";
+  const bits = [
+    preset.name,
+    preset.interviewContent ? `内容：${String(preset.interviewContent).slice(0, 160)}` : "",
+    preset.focusPoints ? `侧重：${String(preset.focusPoints).slice(0, 160)}` : ""
+  ].filter(Boolean);
+  return bits.join("\n");
 }
 
 function categoryBadgeClass(cat) {
@@ -32,13 +73,49 @@ function categoryBadgeClass(cat) {
 
 function resultSelectClass(ui) {
   if (ui === "通过") return "bg-green-100 text-green-800";
-  if (ui === "拒绝") return "bg-red-100 text-red-800";
+  if (ui === "拒绝" || ui === "未通过") return "bg-red-100 text-red-800";
   return "bg-amber-100 text-amber-800";
+}
+
+function ensureRoundConclusion(round) {
+  if (!round.interviewConclusion || typeof round.interviewConclusion !== "object") {
+    round.interviewConclusion = defaultInterviewConclusion();
+  }
+  return round.interviewConclusion;
+}
+
+function onRoundConclusionAssessmentChange(round) {
+  ensureRoundConclusion(round);
+  round.resultUi = assessmentToResultUi(round.interviewConclusion.resultAssessment);
+}
+
+function onNextRoundStatusChange(round, status) {
+  ensureRoundConclusion(round);
+  const s = status === "yes" || status === "pending" || status === "no" ? status : "no";
+  round.interviewConclusion.nextRoundStatus = s;
+  round.interviewConclusion.hasNextRound = s === "yes";
+  if (s === "no") {
+    round.interviewConclusion.nextRoundAdvice = "";
+  }
+}
+
+/** 语音题：在标题旁补充「第几次练习 + 会话 id」，便于同轮多场区分与排查。 */
+function voiceTurnSessionSubtitle(q) {
+  if (q?.source !== "video_turn") return "";
+  const sid = String(q?.videoSessionId || "").trim();
+  if (!sid) return "";
+  const ord = Number(q?.videoSessionOrdinal);
+  const ordPart =
+    Number.isFinite(ord) && ord > 0
+      ? `当轮第 ${ord} 次语音练习`
+      : "旧数据未记录场次序号";
+  const mid = sid.length > 36 ? `${sid.slice(0, 16)}…${sid.slice(-12)}` : sid;
+  return `${ordPart} · 会话 ${mid}`;
 }
 </script>
 
 <template>
-  <section class="bg-white rounded-lg shadow-card p-6">
+  <section v-if="showJobSection" class="bg-white rounded-lg shadow-card p-6">
     <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
       <i class="fa-solid fa-briefcase text-primary"></i>
       岗位信息
@@ -95,11 +172,34 @@ function resultSelectClass(ui) {
         添加面试
       </button>
     </div>
+    <p class="px-6 py-2 text-xs text-gray-500 border-b border-gray-100 bg-gray-50/60 leading-relaxed">
+      多轮面试按顺序展示。若语音场次对应「第 2 轮及以后」而尚未在左侧添加过轮次，系统会按会话轮次自动补齐空轮卡片，便于展示各轮语音复盘；也可提前点击「添加面试」维护多轮。
+    </p>
+
+    <div
+      v-if="recordVideoInterviewMeta && (recordVideoInterviewMeta.evaluation || recordVideoInterviewMeta.sessionId)"
+      class="px-6 py-4 border-b border-emerald-100 bg-emerald-50/50 text-sm"
+    >
+      <div class="font-semibold text-emerald-900 flex items-center gap-2 mb-2">
+        <i class="fa-solid fa-microphone"></i>
+        语音模拟面试总评
+      </div>
+      <p class="text-xs text-emerald-800/90 mb-2 leading-relaxed">
+        以下总评基于本轮语音模拟问答生成，与各轮下方「面试结论」可对照使用。
+      </p>
+      <p v-if="recordVideoInterviewMeta.sessionId" class="text-xs text-gray-600 mb-2 break-all">
+        会话 ID：<code class="bg-white/90 px-1.5 py-0.5 rounded text-gray-800">{{ recordVideoInterviewMeta.sessionId }}</code>
+      </p>
+      <p v-if="recordVideoInterviewMeta.evaluation" class="whitespace-pre-wrap leading-relaxed text-gray-800">
+        {{ recordVideoInterviewMeta.evaluation }}
+      </p>
+      <p v-else class="text-xs text-gray-500">暂无总评正文；结束会话后由服务端生成，若长期为空请检查 Consumer 模型配置。</p>
+    </div>
 
     <div class="divide-y divide-gray-200">
       <div
         v-for="(round, ri) in rounds"
-        :key="round.id"
+        :key="`${round.id || 'round'}-${ri}`"
         class="p-6 hover:bg-gray-50/80 transition-colors"
       >
         <div class="flex justify-between items-start gap-2 mb-4 flex-wrap">
@@ -112,6 +212,16 @@ function resultSelectClass(ui) {
             <span class="px-2 py-1 text-xs rounded-full" :class="categoryBadgeClass(round.category)">{{
               round.category || "技术面"
             }}</span>
+            <button
+              v-if="showVideoStartButton"
+              type="button"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm shrink-0"
+              title="使用当前轮配置开始 AI 语音模拟面试（不采集视频）"
+              @click="emit('start-video-interview', ri)"
+            >
+              <i class="fa-solid fa-microphone"></i>
+              开始语音模拟面试
+            </button>
             <button
               type="button"
               class="text-primary hover:text-blue-800 p-1.5 rounded"
@@ -132,6 +242,21 @@ function resultSelectClass(ui) {
         </div>
 
         <div class="mb-4">
+          <h4 class="text-sm font-medium text-gray-500 mb-2">面试官风格（AI 语音模拟）</h4>
+          <select
+            v-model="round.interviewerStyleKey"
+            class="w-full max-w-md px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary bg-white"
+          >
+            <option v-for="opt in styleOptions" :key="`${round.id}-${opt.value}`" :value="opt.value">{{ opt.label }}</option>
+          </select>
+          <p class="text-xs text-gray-400 mt-1.5 leading-relaxed">
+            自定义风格在侧栏 <strong>面试管理 → 面试官风格管理</strong> 中维护；「面试官信息」里的角色代号可在
+            <strong>面试官角色管理</strong> 中配置面试内容与侧重点，便于团队对齐。
+            内置四类风格为通用话术模版，正文中的简历、岗位、JD 等占位由调用方在对接 AI 语音模拟面试前替换为实际内容。
+          </p>
+        </div>
+
+        <div class="mb-4">
           <h4 class="text-sm font-medium text-gray-500 mb-2">面试官信息</h4>
           <div class="flex flex-wrap gap-2">
             <div
@@ -142,31 +267,11 @@ function resultSelectClass(ui) {
               <span
                 class="w-6 h-6 rounded-full text-white flex items-center justify-center text-[10px] mr-2 shrink-0 font-medium"
                 :class="interviewerBadgeClass(iv.role)"
+                :title="interviewerRoleTooltip(iv.role)"
                 >{{ iv.role }}</span
               >
               <span>{{ iv.name }}</span>
             </div>
-          </div>
-        </div>
-
-        <div class="mb-4">
-          <h4 class="text-sm font-medium text-gray-500 mb-2">面试结果</h4>
-          <div class="flex flex-wrap items-center gap-2">
-            <select
-              v-model="round.resultUi"
-              class="px-3 py-1.5 rounded-full text-sm border-0 cursor-pointer focus:ring-2 focus:ring-primary"
-              :class="resultSelectClass(round.resultUi)"
-            >
-              <option>通过</option>
-              <option>拒绝</option>
-              <option>待评估</option>
-            </select>
-            <input
-              v-model="round.resultComment"
-              type="text"
-              class="flex-1 min-w-[12rem] text-sm border border-gray-200 rounded-md px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary"
-              placeholder="评价备注…"
-            />
           </div>
         </div>
 
@@ -199,9 +304,25 @@ function resultSelectClass(ui) {
               <div class="flex justify-between items-start gap-2">
                 <div class="min-w-0">
                   <div class="flex items-center flex-wrap gap-2">
-                    <span class="text-xs font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded">{{ q.label || `题目${qi + 1}` }}</span>
+                    <span
+                      class="text-xs font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded"
+                      :title="q.source === 'video_turn' && q.videoSessionId ? String(q.videoSessionId) : ''"
+                      >{{ q.label || `题目${qi + 1}` }}</span
+                    >
+                    <span
+                      v-if="q.source === 'video_turn'"
+                      class="text-[10px] font-medium uppercase tracking-wide bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded"
+                      :title="q.videoSessionId ? String(q.videoSessionId) : ''"
+                      >语音</span
+                    >
                     <h5 class="font-medium text-gray-800">{{ q.title || "未命名题目" }}</h5>
                   </div>
+                  <p
+                    v-if="voiceTurnSessionSubtitle(q)"
+                    class="text-[11px] text-slate-500 mt-1 leading-snug"
+                  >
+                    {{ voiceTurnSessionSubtitle(q) }}
+                  </p>
                   <p v-if="q.questionRecord" class="text-sm text-gray-600 mt-1">{{ q.questionRecord }}</p>
                 </div>
                 <div class="flex gap-1 shrink-0">
@@ -263,6 +384,119 @@ function resultSelectClass(ui) {
               </div>
             </div>
           </div>
+        </div>
+
+        <div
+          v-if="ensureRoundConclusion(round)"
+          class="mt-6 pt-5 border-t border-slate-200 bg-slate-50/90 rounded-lg p-4 text-sm space-y-3"
+        >
+          <h4 class="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <i class="fa-solid fa-clipboard-check text-primary"></i>
+            本轮面试结论
+          </h4>
+          <p class="text-xs text-gray-500 leading-relaxed">
+            仅针对本栏「{{ round.roundTitle }}」；与上方复盘同属该轮。点击详情「保存」写入 summary；列表中的总结果仍取最后一轮的面试结果评估。
+          </p>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label class="block space-y-1.5 min-w-0">
+              <span class="text-xs font-medium text-gray-600">本轮面试结果评估</span>
+              <select
+                v-model="round.interviewConclusion.resultAssessment"
+                class="w-full max-w-xs px-3 py-2 border border-gray-300 rounded-md text-sm bg-white focus:ring-2 focus:ring-primary"
+                :class="resultSelectClass(round.interviewConclusion.resultAssessment)"
+                @change="onRoundConclusionAssessmentChange(round)"
+              >
+                <option>通过</option>
+                <option>未通过</option>
+                <option>待评估</option>
+              </select>
+            </label>
+            <label class="block space-y-1.5 min-w-0">
+              <span class="text-xs font-medium text-gray-600">面试综合分数（0–100）</span>
+              <input
+                v-model.number="round.interviewConclusion.overallScore"
+                type="number"
+                min="0"
+                max="100"
+                class="w-full max-w-xs px-3 py-2 border border-gray-300 rounded-md text-sm bg-white"
+              />
+            </label>
+          </div>
+          <label class="block space-y-1.5">
+            <span class="text-xs font-medium text-gray-600">面试评语</span>
+            <textarea
+              v-model="round.interviewConclusion.comment"
+              rows="3"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm bg-white resize-y"
+              placeholder="综合表现、关键优劣与录用建议等"
+            />
+          </label>
+          <label class="block space-y-1.5">
+            <span class="text-xs font-medium text-gray-600">对面试者的画像</span>
+            <textarea
+              v-model="round.interviewConclusion.candidatePortrait"
+              rows="2"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm bg-white resize-y"
+              placeholder="能力特点、沟通风格、潜力与风险等"
+            />
+          </label>
+          <div class="space-y-2">
+            <span class="text-xs font-medium text-gray-600">是否有下一轮面试</span>
+            <div
+              class="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:gap-6 text-sm text-gray-800"
+              role="radiogroup"
+              :aria-label="'是否有下一轮-' + (round.id || ri)"
+            >
+              <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="radio"
+                  class="text-primary border-gray-300 focus:ring-primary"
+                  :name="'next-round-' + (round.id || ri)"
+                  value="no"
+                  :checked="round.interviewConclusion.nextRoundStatus === 'no'"
+                  @change="onNextRoundStatusChange(round, 'no')"
+                />
+                <span>否</span>
+              </label>
+              <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="radio"
+                  class="text-primary border-gray-300 focus:ring-primary"
+                  :name="'next-round-' + (round.id || ri)"
+                  value="pending"
+                  :checked="round.interviewConclusion.nextRoundStatus === 'pending'"
+                  @change="onNextRoundStatusChange(round, 'pending')"
+                />
+                <span>待定</span>
+              </label>
+              <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="radio"
+                  class="text-primary border-gray-300 focus:ring-primary"
+                  :name="'next-round-' + (round.id || ri)"
+                  value="yes"
+                  :checked="round.interviewConclusion.nextRoundStatus === 'yes'"
+                  @change="onNextRoundStatusChange(round, 'yes')"
+                />
+                <span>是</span>
+              </label>
+            </div>
+          </div>
+          <label
+            v-if="
+              round.interviewConclusion.nextRoundStatus === 'yes' ||
+              round.interviewConclusion.nextRoundStatus === 'pending'
+            "
+            class="block space-y-1.5"
+          >
+            <span class="text-xs font-medium text-gray-600">下轮面试建议</span>
+            <textarea
+              v-model="round.interviewConclusion.nextRoundAdvice"
+              rows="2"
+              class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm bg-white resize-y"
+              placeholder="可写对候选人或面试官的侧重建议、准备要点等"
+            />
+          </label>
         </div>
       </div>
     </div>

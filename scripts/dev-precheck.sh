@@ -41,4 +41,8 @@ if [[ "$missing" -ne 0 ]]; then
   exit 1
 fi
 
+if ! command -v node >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; then
+  echo "提示：验收脚本 dev-check 解析 JSON 需要 node 或 jq（通常已随 Node 安装 node）。"
+fi
+
 echo "依赖检查通过。"
