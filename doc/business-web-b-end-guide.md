@@ -161,6 +161,8 @@ B 端是面向「求职过程管理」的 **企业/个人工作台**：以 **空
 
 - **结构**：`answerCards` 数组，支持自定义卡片、拖拽排序；持久化字段含 `cardsJson` 及 legacy 五段字段兼容。
 - **保存**：`saveAnswerBank`（`getAnswerBank` 拉取后解析 `cardsJson` 或 legacy）。
+- **从面试复盘收藏**：模拟/正式面试详情中，复盘题目卡片或题目详情弹层可 **收藏/取消收藏**（书签切换）；收藏后写入 `answerBankCardKey` 并新增题库卡片，取消收藏则从题库删除对应卡片；均 **自动保存** 当前面试会话 `summary`。
+- **题库卡片交互**：列表卡片样式对齐面试复盘题卡；支持 **查看详情**、**修改**、**删除**（右侧铅笔/垃圾桶图标）。在修改弹层保存时，若卡片关联面试题（`sourceQuestionId`），浏览器 `confirm` 询问是否 **同步更新** 对应面试复盘题目；选「确定」则写回 `summary` 并持久化，选「取消」仅更新题库。
 
 ### 6.4 模拟面试（`mock`）
 
@@ -182,6 +184,7 @@ B 端是面向「求职过程管理」的 **企业/个人工作台**：以 **空
 ### 6.6 系统设置 / 百炼（`config`）
 
 - **阿里云百炼**：`modelConfig`（provider、baseUrl、apiKey、modelName、测试提示语）。
+- **敏感字段非对称加密**：注册/登录口令与保存的 API Key 在浏览器侧用 **`GET /crypto/public-key`** 返回的 RSA 公钥（RSA-OAEP SHA-256）加密后以 `RSA1:` + Base64 提交；business 私钥解密后，口令仍 **BCrypt** 存库，API Key 以 **RSA 密文** 存 `mm_ai_model_config.api_key`；查询配置不回传明文（`apiKeyConfigured` + 占位符 `********`）。
 - **操作**：保存到后端按**登录用户**维度 `saveModelConfig` / `getModelConfig`（与空间无关，同一账号下全部空间共享）；「测试调用」走 **`POST /model-configs/test`**：服务端从数据库读取当前用户的 `baseUrl` 与 `apiKey`，使用前端提交的测试提示词与模型名调用大模型，返回 `assistantText`。
 - **进入方式**：侧栏 **系统功能 → 系统设置**，或顶栏 **AI** 入口（均切到 `activeTab === 'config'`）。
 

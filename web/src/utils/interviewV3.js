@@ -75,7 +75,9 @@ export function defaultQuestion(index = 0) {
     /** 同轮多次语音时第几场（1-based）；非语音题为 0 */
     videoSessionOrdinal: 0,
     /** 综合评价给出的本题得分权重（0–1），仅语音题；写入 summary 供回显 */
-    scoreWeight: 0
+    scoreWeight: 0,
+    /** 已收藏至标准题库时对应 answerCards[].key */
+    answerBankCardKey: ""
   };
 }
 
@@ -146,7 +148,8 @@ export function normalizeQuestion(q, idx) {
     scoreWeight:
       source === "video_turn"
         ? Math.min(1, Math.max(0, Number(q.scoreWeight) || 0))
-        : 0
+        : 0,
+    answerBankCardKey: String(q.answerBankCardKey ?? "").trim()
   };
 }
 
@@ -735,6 +738,8 @@ export function serializeV3(jobProfile, rounds, meta = {}) {
           difficulty: clampDifficulty(q.difficulty),
           score: Number(q.score) || 0
         };
+        const abk = String(q.answerBankCardKey ?? "").trim();
+        const abkOut = abk ? { answerBankCardKey: abk } : {};
         if (q.source === "video_turn" || q.videoTurnId || q.videoSessionId) {
           const ord = Number(q.videoSessionOrdinal);
           const vo = Number.isFinite(ord) && ord > 0 ? Math.floor(ord) : 0;
@@ -746,10 +751,11 @@ export function serializeV3(jobProfile, rounds, meta = {}) {
             videoTurnId: q.videoTurnId || "",
             videoSessionId: q.videoSessionId || "",
             ...(vo > 0 ? { videoSessionOrdinal: vo } : {}),
-            ...(swOut > 0 ? { scoreWeight: swOut } : {})
+            ...(swOut > 0 ? { scoreWeight: swOut } : {}),
+            ...abkOut
           };
         }
-        return base;
+        return abk ? { ...base, ...abkOut } : base;
       })
       };
     }),

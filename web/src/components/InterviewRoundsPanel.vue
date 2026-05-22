@@ -22,10 +22,16 @@ const emit = defineEmits([
   "edit-round",
   "remove-round",
   "add-question",
+  "view-question",
   "edit-question",
   "remove-question",
+  "collect-to-answer-bank",
   "start-video-interview"
 ]);
+
+function isQuestionInAnswerBank(q) {
+  return !!String(q?.answerBankCardKey ?? "").trim();
+}
 
 function interviewerBadgeClass(role) {
   const s = String(role || "");
@@ -299,7 +305,11 @@ function voiceTurnSessionSubtitle(q) {
             <div
               v-for="(q, qi) in round.questions || []"
               :key="q.id"
-              class="bg-gray-50 p-4 rounded-lg border border-gray-200 hover:shadow-card transition-shadow"
+              role="button"
+              tabindex="0"
+              class="bg-gray-50 p-4 rounded-lg border border-gray-200 hover:shadow-card hover:border-primary/30 transition-shadow cursor-pointer"
+              @click="emit('view-question', ri, q)"
+              @keydown.enter.prevent="emit('view-question', ri, q)"
             >
               <div class="flex justify-between items-start gap-2">
                 <div class="min-w-0">
@@ -315,6 +325,11 @@ function voiceTurnSessionSubtitle(q) {
                       :title="q.videoSessionId ? String(q.videoSessionId) : ''"
                       >语音</span
                     >
+                    <span
+                      v-if="isQuestionInAnswerBank(q)"
+                      class="text-[10px] font-medium bg-amber-100 text-amber-900 px-2 py-0.5 rounded"
+                      >已收藏</span
+                    >
                     <h5 class="font-medium text-gray-800">{{ q.title || "未命名题目" }}</h5>
                   </div>
                   <p
@@ -328,9 +343,26 @@ function voiceTurnSessionSubtitle(q) {
                 <div class="flex gap-1 shrink-0">
                   <button
                     type="button"
+                    class="p-1"
+                    :class="
+                      isQuestionInAnswerBank(q)
+                        ? 'text-amber-600 hover:text-amber-800'
+                        : 'text-gray-400 hover:text-amber-600'
+                    "
+                    :title="isQuestionInAnswerBank(q) ? '取消收藏' : '收藏至标准题库'"
+                    @click.stop="emit('collect-to-answer-bank', ri, q)"
+                  >
+                    <i
+                      :class="
+                        isQuestionInAnswerBank(q) ? 'fa-solid fa-bookmark' : 'fa-regular fa-bookmark'
+                      "
+                    ></i>
+                  </button>
+                  <button
+                    type="button"
                     class="text-gray-400 hover:text-gray-700 p-1"
                     title="编辑"
-                    @click="emit('edit-question', ri, q)"
+                    @click.stop="emit('edit-question', ri, q)"
                   >
                     <i class="fa-solid fa-pencil"></i>
                   </button>
@@ -338,7 +370,7 @@ function voiceTurnSessionSubtitle(q) {
                     type="button"
                     class="text-gray-400 hover:text-red-600 p-1"
                     title="删除"
-                    @click="emit('remove-question', ri, q.id)"
+                    @click.stop="emit('remove-question', ri, q.id)"
                   >
                     <i class="fa-solid fa-trash"></i>
                   </button>

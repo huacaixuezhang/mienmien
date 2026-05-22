@@ -6,6 +6,7 @@ import com.mienmien.business.management.domain.model.UserAccount;
 import com.mienmien.business.management.domain.repository.BusinessSessionRepository;
 import com.mienmien.business.management.domain.repository.UserAccountRepository;
 import com.mienmien.business.management.domain.support.ShortIdGenerator;
+import com.mienmien.business.management.infrastructure.crypto.RsaAsymmetricCryptoService;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -20,24 +21,28 @@ public class UserAuthApplicationService {
     private final BusinessSessionRepository businessSessionRepository;
     private final PasswordEncoder passwordEncoder;
     private final ShortIdGenerator shortIdGenerator;
+    private final RsaAsymmetricCryptoService rsaAsymmetricCryptoService;
 
     public UserAuthApplicationService(
             UserAccountRepository userAccountRepository,
             BusinessSessionRepository businessSessionRepository,
             PasswordEncoder passwordEncoder,
-            ShortIdGenerator shortIdGenerator) {
+            ShortIdGenerator shortIdGenerator,
+            RsaAsymmetricCryptoService rsaAsymmetricCryptoService) {
         this.userAccountRepository = userAccountRepository;
         this.businessSessionRepository = businessSessionRepository;
         this.passwordEncoder = passwordEncoder;
         this.shortIdGenerator = shortIdGenerator;
+        this.rsaAsymmetricCryptoService = rsaAsymmetricCryptoService;
     }
 
-    public UserAuthResponse register(String phone, String password) {
+    public UserAuthResponse register(String phone, String passwordCipher) {
         if (userAccountRepository.findByPhone(phone).isPresent()) {
             throw new DomainException("BUS-4091", "该手机号已注册");
         }
+        String plainPassword = rsaAsymmetricCryptoService.resolveInboundSecret(passwordCipher);
         String userId = shortIdGenerator.newId("u");
-        String digest = passwordEncoder.encode(password);
+        String digest = passwordEncoder.encode(plainPassword);
         UserAccount account = UserAccount.createWithPasswordDigest(userId, phone, digest);
         userAccountRepository.save(account);
         String token = newSessionToken();
@@ -45,10 +50,11 @@ public class UserAuthApplicationService {
         return new UserAuthResponse(userId, phone, token);
     }
 
-    public UserAuthResponse login(String phone, String password) {
+    public UserAuthResponse login(String phone, String passwordCipher) {
+        String plainPassword = rsaAsymmetricCryptoService.resolveInboundSecret(passwordCipher);
         UserAccount account = userAccountRepository.findByPhone(phone)
                 .orElseThrow(() -> new DomainException("BUS-4012", "手机号或密码错误"));
-        if (!passwordMatches(password, account.getPasswordDigest())) {
+        if (!passwordMatches(plainPassword, account.getPasswordDigest())) {
             throw new DomainException("BUS-4012", "手机号或密码错误");
         }
         String token = newSessionToken();

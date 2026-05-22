@@ -41,6 +41,10 @@ public class BusinessSessionAuthFilter extends OncePerRequestFilter {
                 filterChain.doFilter(request, response);
                 return;
             }
+            if (uri != null && uri.startsWith("/api/v1/business/crypto/")) {
+                filterChain.doFilter(request, response);
+                return;
+            }
             String token = extractBearer(request.getHeader("Authorization"));
             if (token != null && !token.isBlank()) {
                 businessSessionRepository.findUserIdByValidToken(token).ifPresent(BusinessRequestActor::setUserId);

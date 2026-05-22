@@ -8,7 +8,9 @@ public record AiModelConfigResponse(
         String ownerUserId,
         String provider,
         String baseUrl,
+        /** 不回传明文；已配置时为占位符 */
         String apiKey,
+        boolean apiKeyConfigured,
         String modelName,
         Instant updatedAt
 ) {

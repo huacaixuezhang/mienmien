@@ -37,6 +37,12 @@ mienmien:
       auto-patch-video-interview-session: ${AUTO_PATCH_VIDEO_INTERVIEW_SCHEMA:true}
     recycle:
       cleanup-cron: "0 30 3 * * *"
+    crypto:
+      # RSA 私钥 PEM（PKCS#8）。生产用环境变量 MIENMIEN_RSA_PRIVATE_KEY_PEM 注入，勿提交仓库。
+      rsa-private-key-pem: ${MIENMIEN_RSA_PRIVATE_KEY_PEM:}
+      rsa-public-key-pem: ${MIENMIEN_RSA_PUBLIC_KEY_PEM:}
+      # 为 true 时禁止明文口令/API Key 入站，前端须 RSA1: 密文
+      require-client-cipher: ${MIENMIEN_REQUIRE_CLIENT_CIPHER:false}
     jd-ai:
       # 百炼 OpenAI 兼容 Chat Completions，与控制台「HTTP 调用」文档一致；密钥勿提交仓库，用环境变量注入。
       # 控制台：https://bailian.console.aliyun.com/cn-beijing?tab=api#/api

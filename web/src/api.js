@@ -16,7 +16,9 @@ function readSessionToken() {
 
 async function fetchJson(url, options = {}) {
   const skipAuth =
-    url.includes("/auth/register") || url.includes("/auth/login");
+    url.includes("/auth/register") ||
+    url.includes("/auth/login") ||
+    url.includes("/crypto/public-key");
   const headers = new Headers(options.headers || {});
   if (options.body != null && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -489,6 +491,10 @@ export async function updateInterviewerRole(roleId, payload) {
 
 export async function deleteInterviewerRole(roleId) {
   await fetchJson(`${BIZ}/interviewer-roles/${encodeURIComponent(roleId)}`, { method: "DELETE" });
+}
+
+export async function getBusinessCryptoPublicKey() {
+  return fetchJson(`${BIZ}/crypto/public-key`);
 }
 
 export async function registerByPhone(payload) {

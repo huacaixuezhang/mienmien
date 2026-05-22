@@ -75,6 +75,9 @@ import { BUILTIN_INTERVIEWER_STYLES, CUSTOM_INTERVIEWER_STYLE_TEMPLATE } from ".
 import { BUILTIN_INTERVIEWER_ROLE_OPTIONS } from "./constants/interviewerRolePresets.js";
 import { interviewerStyleLabel } from "./utils/interviewerStyleResolve.js";
 import InterviewRoundsPanel from "./components/InterviewRoundsPanel.vue";
+import InterviewQuestionDetailModal from "./components/InterviewQuestionDetailModal.vue";
+import AnswerBankCardDetailModal from "./components/AnswerBankCardDetailModal.vue";
+import AnswerBankCardEditModal from "./components/AnswerBankCardEditModal.vue";
 import VideoInterviewRoom from "./components/VideoInterviewRoom.vue";
 import GlobalVoiceprintSettings from "./components/GlobalVoiceprintSettings.vue";
 import {
@@ -86,6 +89,16 @@ import {
   jobTypeLabel
 } from "./utils/jobMeta";
 import { compressResumePayload } from "./utils/resumeHtmlCompress";
+import { isMaskedApiKeyPlaceholder, sealSecretForBusiness } from "./utils/rsaClientCipher";
+import {
+  applyAnswerBankCardToQuestion,
+  buildAnswerBankCardFromQuestion,
+  findAnswerBankCardForQuestion,
+  findInterviewQuestionLinksForAnswerCard,
+  parseAnswerBankCards,
+  previewAnswerBankCardText,
+  removeAnswerBankCardsForQuestion
+} from "./utils/interviewQuestionToAnswerBank";
 
 /** 侧栏「当前空间」：题库与面试 */
 const sidebarSpaceNav = [
@@ -217,6 +230,12 @@ function defaultAnswerCards() {
 const answerCards = reactive(defaultAnswerCards());
 const newAnswerCardTitle = ref("");
 const draggingAnswerIndex = ref(-1);
+const answerBankDetailOpen = ref(false);
+const answerBankDetailCard = ref(null);
+const answerBankEditOpen = ref(false);
+const answerBankEditIndex = ref(-1);
+const answerBankEditDraft = reactive({ title: "", text: "" });
+const answerBankEditSaving = ref(false);
 
 /** 岗位弹窗内：粘贴完整 JD，用于一键解析回填各字段（考点、描述、jdDetail 随 base_range 入库） */
 const jobModalJdPaste = ref("");
@@ -308,6 +327,10 @@ const createInterviewSessionJobId = ref("");
 
 const addInterviewModalOpen = ref(false);
 const addQuestionModalOpen = ref(false);
+const questionDetailOpen = ref(false);
+const questionDetailForMock = ref(false);
+const questionDetailRoundIndex = ref(0);
+const questionDetailQuestion = ref(null);
 const videoInterviewRoomOpen = ref(false);
 const videoInterviewSessionPayload = ref(null);
 const videoInterviewRoomContext = ref({ forMock: true, roundIndex: 0, roundTitle: "" });
@@ -829,6 +852,18 @@ function mergeVideoTurnsIntoRound(round, turns, sessionId) {
   if (!round.questions) {
     round.questions = [];
   }
+  /** 语音题重建前保留「已收藏」标记，避免 hydrate 后 UI 丢失 */
+  const answerBankKeyByTurnId = new Map();
+  const answerBankKeyByQuestionId = new Map();
+  for (const q of round.questions || []) {
+    if (q?.source !== "video_turn" || String(q.videoSessionId || "") !== sessionId) continue;
+    const abk = String(q.answerBankCardKey ?? "").trim();
+    if (!abk) continue;
+    const tid = String(q.videoTurnId ?? "").trim();
+    if (tid) answerBankKeyByTurnId.set(tid, abk);
+    const qid = String(q.id ?? "").trim();
+    if (qid) answerBankKeyByQuestionId.set(qid, abk);
+  }
   const ordinalMap = buildVideoSessionOrdinalMap(round.questions, sessionId);
   const sessionOrdinal = ordinalMap.get(sessionId) || 1;
   round.questions = round.questions.filter((q) => !(q.source === "video_turn" && q.videoSessionId === sessionId));
@@ -882,10 +917,174 @@ function mergeVideoTurnsIntoRound(round, turns, sessionId) {
     q.videoSessionId = sessionId;
     q.difficulty = 2;
     q.score = extractVoiceTurnScoreFromEvaluationJson(typeof ev === "string" ? ev : "");
+    const restoredAbk =
+      answerBankKeyByTurnId.get(tid) ||
+      answerBankKeyByQuestionId.get(q.id) ||
+      answerBankKeyByQuestionId.get(`vi_${tid}`);
+    if (restoredAbk) {
+      q.answerBankCardKey = restoredAbk;
+    }
     round.questions.push(q);
   }
   enrichVoiceTurnLabelsWhenMultiSession(round.questions);
   syncInterviewConclusionOverallScoreFromQuestions(round);
+}
+
+const questionDetailRoundTitle = computed(() => {
+  if (!questionDetailOpen.value) return "";
+  const rounds = questionDetailForMock.value ? mockInterviewRounds : realInterviewRounds;
+  const r = rounds[questionDetailRoundIndex.value];
+  return (r?.roundTitle || "").trim() || `第${questionDetailRoundIndex.value + 1}轮面试`;
+});
+
+function openQuestionDetailModal(forMock, roundIndex, q) {
+  resetPanelModalDrag();
+  questionDetailForMock.value = forMock;
+  questionDetailRoundIndex.value = roundIndex;
+  questionDetailQuestion.value = q ? { ...q } : null;
+  questionDetailOpen.value = true;
+}
+
+function closeQuestionDetailModal() {
+  resetPanelModalDrag();
+  questionDetailOpen.value = false;
+  questionDetailQuestion.value = null;
+}
+
+function editQuestionFromDetail() {
+  const q = questionDetailQuestion.value;
+  if (!q) return;
+  const forMock = questionDetailForMock.value;
+  const ri = questionDetailRoundIndex.value;
+  closeQuestionDetailModal();
+  openEditQuestionModal(forMock, ri, q);
+}
+
+const collectToAnswerBankBusy = ref(false);
+
+function syncQuestionDetailAnswerBankKey(questionId, cardKey) {
+  if (
+    questionDetailOpen.value &&
+    questionDetailQuestion.value &&
+    String(questionDetailQuestion.value.id) === String(questionId)
+  ) {
+    questionDetailQuestion.value = {
+      ...questionDetailQuestion.value,
+      answerBankCardKey: cardKey || ""
+    };
+  }
+}
+
+async function persistAnswerBankCards(cards, bank) {
+  const byKey = Object.fromEntries(cards.map((c) => [c.key, c.text || ""]));
+  await saveAnswerBank({
+    spaceId: currentSpaceId.value,
+    intro: byKey.intro || bank.intro || "",
+    reason: byKey.reason || bank.reason || "",
+    strengths: byKey.strengths || bank.strengths || "",
+    project: byKey.project || bank.project || "",
+    hr: byKey.hr || bank.hr || "",
+    cardsJson: JSON.stringify(cards)
+  });
+}
+
+function removeLocalAnswerCard(questionId, cardKey) {
+  const qid = String(questionId ?? "").trim();
+  const key = String(cardKey ?? "").trim();
+  const idx = answerCards.findIndex(
+    (c) =>
+      (key && c.key === key) || (qid && String(c.sourceQuestionId ?? "").trim() === qid)
+  );
+  if (idx >= 0) answerCards.splice(idx, 1);
+}
+
+async function collectQuestionToAnswerBank(forMock, roundIndex, q) {
+  if (!currentSpaceId.value) {
+    showToast("请先选择工作空间", "error");
+    return;
+  }
+  if (forMock && !selectedMockRecordId.value) {
+    showToast("请先进入模拟面试会话", "error");
+    return;
+  }
+  if (!forMock && !selectedRealRecordId.value) {
+    showToast("请先进入正式面试会话", "error");
+    return;
+  }
+  const rounds = forMock ? mockInterviewRounds : realInterviewRounds;
+  const r = rounds[roundIndex];
+  if (!r?.questions || !q?.id) return;
+  const live = r.questions.find((x) => x.id === q.id);
+  if (!live) return;
+
+  const existingKey = String(live.answerBankCardKey || "").trim();
+  if (existingKey) {
+    await uncollectQuestionFromAnswerBank(forMock, live, existingKey);
+    return;
+  }
+
+  if (collectToAnswerBankBusy.value) return;
+  collectToAnswerBankBusy.value = true;
+
+  try {
+    const bank = await getAnswerBank(currentSpaceId.value);
+    let cards = parseAnswerBankCards(bank.cardsJson);
+    const draft = buildAnswerBankCardFromQuestion(live);
+    const dup = findAnswerBankCardForQuestion(cards, live.id, draft.key);
+    const cardKey = dup ? String(dup.key ?? draft.key).trim() : draft.key;
+
+    if (!dup) {
+      cards.push({
+        key: draft.key,
+        title: draft.title,
+        text: draft.text,
+        sourceQuestionId: draft.sourceQuestionId
+      });
+      await persistAnswerBankCards(cards, bank);
+    }
+
+    live.answerBankCardKey = cardKey;
+    syncQuestionDetailAnswerBankKey(live.id, cardKey);
+
+    if (!answerCards.some((c) => c.key === cardKey || c.sourceQuestionId === live.id)) {
+      answerCards.push({
+        key: cardKey,
+        title: draft.title,
+        text: draft.text,
+        sourceQuestionId: draft.sourceQuestionId
+      });
+    }
+
+    await (forMock ? saveMockInterviewSession : saveRealInterviewSession)({ silent: true });
+    showToast(dup ? "已同步收藏状态" : "已收藏至标准题库，面试记录已保存", dup ? "info" : "success");
+  } catch (e) {
+    showToast(e?.message || "收藏失败", "error");
+  } finally {
+    collectToAnswerBankBusy.value = false;
+  }
+}
+
+async function uncollectQuestionFromAnswerBank(forMock, live, cardKey) {
+  if (collectToAnswerBankBusy.value) return;
+  collectToAnswerBankBusy.value = true;
+
+  try {
+    const bank = await getAnswerBank(currentSpaceId.value);
+    let cards = parseAnswerBankCards(bank.cardsJson);
+    cards = removeAnswerBankCardsForQuestion(cards, live.id, cardKey);
+    await persistAnswerBankCards(cards, bank);
+
+    live.answerBankCardKey = "";
+    syncQuestionDetailAnswerBankKey(live.id, "");
+    removeLocalAnswerCard(live.id, cardKey);
+
+    await (forMock ? saveMockInterviewSession : saveRealInterviewSession)({ silent: true });
+    showToast("已取消收藏，并从标准题库移除", "success");
+  } catch (e) {
+    showToast(e?.message || "取消收藏失败", "error");
+  } finally {
+    collectToAnswerBankBusy.value = false;
+  }
 }
 
 function openAddQuestionModal(forMock, roundIndex) {
@@ -2060,9 +2259,10 @@ async function registerUser() {
     return;
   }
   try {
+    const password = await sealSecretForBusiness(userForm.registerPassword);
     const res = await registerByPhone({
       phone: userForm.registerPhone,
-      password: userForm.registerPassword
+      password
     });
     if (!res?.sessionToken) {
       alert(
@@ -2097,9 +2297,10 @@ async function registerUser() {
 
 async function loginUser() {
   try {
+    const password = await sealSecretForBusiness(userForm.loginPassword);
     const res = await loginByPhone({
       phone: userForm.loginPhone,
-      password: userForm.loginPassword
+      password
     });
     if (!res?.sessionToken) {
       alert(
@@ -2188,7 +2389,10 @@ async function loadBailianConfig() {
   const config = await getModelConfig();
   modelConfig.provider = (config.provider && String(config.provider).trim()) || "aliyun-bailian";
   modelConfig.baseUrl = pickModelConfigString(config, "baseUrl", "base_url");
-  modelConfig.apiKey = pickModelConfigString(config, "apiKey", "api_key");
+  const configured = config.apiKeyConfigured === true || config.api_key_configured === true;
+  modelConfig.apiKey = configured
+    ? "********"
+    : pickModelConfigString(config, "apiKey", "api_key");
   modelConfig.modelName = pickModelConfigString(config, "modelName", "model_name");
 }
 
@@ -2197,12 +2401,19 @@ async function saveBailianConfig() {
     alert("请先登录");
     return;
   }
+  let apiKeyPayload = modelConfig.apiKey.trim();
+  if (!isMaskedApiKeyPlaceholder(apiKeyPayload)) {
+    apiKeyPayload = await sealSecretForBusiness(apiKeyPayload);
+  } else {
+    apiKeyPayload = "";
+  }
   await saveModelConfig({
     provider: modelConfig.provider || "aliyun-bailian",
     baseUrl: modelConfig.baseUrl.trim(),
-    apiKey: modelConfig.apiKey.trim(),
+    apiKey: apiKeyPayload,
     modelName: modelConfig.modelName.trim()
   });
+  await loadBailianConfig();
   alert("百炼连接配置已保存到后端（当前账号下全部空间共享）");
 }
 
@@ -3028,6 +3239,7 @@ async function loadSpaceData() {
     return;
   }
   if (activeTab.value === "answer") {
+    interviews.value = await listInterview(currentSpaceId.value);
     const bank = await getAnswerBank(currentSpaceId.value);
     if (bank.cardsJson) {
       try {
@@ -3225,6 +3437,202 @@ async function saveAnswer() {
     hr: byKey.hr || "",
     cardsJson: JSON.stringify(answerCards)
   });
+  showToast("题库已保存", "success");
+}
+
+async function ensureSpaceInterviewsLoaded() {
+  if (!currentSpaceId.value) return [];
+  if (!interviews.value.length) {
+    interviews.value = await listInterview(currentSpaceId.value);
+  }
+  return interviews.value;
+}
+
+function openAnswerBankDetail(index) {
+  const card = answerCards[index];
+  if (!card) return;
+  resetPanelModalDrag();
+  answerBankDetailCard.value = { ...card };
+  answerBankDetailOpen.value = true;
+}
+
+function closeAnswerBankDetail() {
+  resetPanelModalDrag();
+  answerBankDetailOpen.value = false;
+  answerBankDetailCard.value = null;
+}
+
+function openAnswerBankEdit(index) {
+  const card = answerCards[index];
+  if (!card) return;
+  resetPanelModalDrag();
+  answerBankEditIndex.value = index;
+  answerBankEditDraft.title = card.title || "";
+  answerBankEditDraft.text = card.text || "";
+  answerBankEditOpen.value = true;
+  if (answerBankDetailOpen.value) {
+    closeAnswerBankDetail();
+  }
+}
+
+function closeAnswerBankEdit() {
+  resetPanelModalDrag();
+  answerBankEditOpen.value = false;
+  answerBankEditIndex.value = -1;
+}
+
+function editAnswerBankFromDetail() {
+  const card = answerBankDetailCard.value;
+  if (!card) return;
+  const idx = answerCards.findIndex((c) => c.key === card.key);
+  if (idx >= 0) openAnswerBankEdit(idx);
+}
+
+function patchOpenEditorQuestionsFromAnswerCard(card, hits) {
+  for (const h of hits) {
+    if (String(selectedMockRecordId.value) === String(h.recordId)) {
+      const q = mockInterviewRounds[h.roundIndex]?.questions?.find((x) => x.id === h.questionId);
+      if (q) applyAnswerBankCardToQuestion(q, card);
+    }
+    if (String(selectedRealRecordId.value) === String(h.recordId)) {
+      const q = realInterviewRounds[h.roundIndex]?.questions?.find((x) => x.id === h.questionId);
+      if (q) applyAnswerBankCardToQuestion(q, card);
+    }
+  }
+}
+
+async function persistInterviewRowSummary(row, jobProfile, rounds, meta) {
+  prepareInterviewRoundsForPersist(rounds);
+  const summary = serializeV3(jobProfile, rounds, meta || {});
+  const qAvg = averageQuestionScore(rounds);
+  const lastR = rounds[rounds.length - 1];
+  const oc = lastR?.interviewConclusion;
+  const ocScore = oc != null ? Number(oc.overallScore) : NaN;
+  const score = Number.isFinite(ocScore) ? Math.min(100, Math.max(0, Math.round(ocScore))) : qAvg;
+  const metaPid =
+    meta?.positionId != null && String(meta.positionId).trim() !== ""
+      ? String(meta.positionId).trim()
+      : "";
+  const boundPid =
+    metaPid ||
+    (row?.positionId != null && String(row.positionId).trim() !== "" ? String(row.positionId).trim() : null);
+  await updateInterview(row.recordId, {
+    spaceId: currentSpaceId.value,
+    round: Math.max(1, rounds.length),
+    interviewType: firstRoundInterviewType(rounds),
+    score,
+    summary,
+    result: aggregateRoundResults(rounds),
+    positionId: boundPid
+  });
+}
+
+async function syncAnswerCardToInterviewRecords(card, hits) {
+  if (!hits.length) return;
+  const rows = await ensureSpaceInterviewsLoaded();
+  const byRecord = new Map();
+  for (const h of hits) {
+    if (!byRecord.has(h.recordId)) byRecord.set(h.recordId, []);
+    byRecord.get(h.recordId).push(h);
+  }
+
+  for (const [recordId, linkHits] of byRecord) {
+    const row = rows.find((r) => String(r.recordId) === String(recordId));
+    if (!row) continue;
+    const parsed = parseInterviewPayload(row.summary || "");
+    if (parsed.kind !== "v3") continue;
+
+    for (const h of linkHits) {
+      const q = parsed.rounds[h.roundIndex]?.questions?.find((x) => x.id === h.questionId);
+      if (q) applyAnswerBankCardToQuestion(q, card);
+    }
+
+    await persistInterviewRowSummary(row, parsed.jobProfile, parsed.rounds, parsed.meta || {});
+    const updated = rows.find((r) => String(r.recordId) === String(recordId));
+    if (updated) {
+      updated.summary = serializeV3(parsed.jobProfile, parsed.rounds, parsed.meta || {});
+    }
+  }
+
+  patchOpenEditorQuestionsFromAnswerCard(card, hits);
+  interviews.value = await listInterview(currentSpaceId.value);
+}
+
+async function clearInterviewAnswerBankLinks(card) {
+  const rows = await ensureSpaceInterviewsLoaded();
+  const hits = findInterviewQuestionLinksForAnswerCard(rows, card);
+  if (!hits.length) return;
+
+  const byRecord = new Map();
+  for (const h of hits) {
+    if (!byRecord.has(h.recordId)) byRecord.set(h.recordId, []);
+    byRecord.get(h.recordId).push(h);
+  }
+
+  for (const [recordId, linkHits] of byRecord) {
+    const row = rows.find((r) => String(r.recordId) === String(recordId));
+    if (!row) continue;
+    const parsed = parseInterviewPayload(row.summary || "");
+    if (parsed.kind !== "v3") continue;
+
+    for (const h of linkHits) {
+      const q = parsed.rounds[h.roundIndex]?.questions?.find((x) => x.id === h.questionId);
+      if (q) q.answerBankCardKey = "";
+    }
+
+    await persistInterviewRowSummary(row, parsed.jobProfile, parsed.rounds, parsed.meta || {});
+
+    for (const h of linkHits) {
+      if (String(selectedMockRecordId.value) === String(recordId)) {
+        const q = mockInterviewRounds[h.roundIndex]?.questions?.find((x) => x.id === h.questionId);
+        if (q) q.answerBankCardKey = "";
+      }
+      if (String(selectedRealRecordId.value) === String(recordId)) {
+        const q = realInterviewRounds[h.roundIndex]?.questions?.find((x) => x.id === h.questionId);
+        if (q) q.answerBankCardKey = "";
+      }
+    }
+  }
+  interviews.value = await listInterview(currentSpaceId.value);
+}
+
+async function submitAnswerBankEdit() {
+  const idx = answerBankEditIndex.value;
+  const card = answerCards[idx];
+  if (!card || !currentSpaceId.value) return;
+
+  answerBankEditSaving.value = true;
+  try {
+    card.title = (answerBankEditDraft.title || "").trim() || card.title || `自定义题库${idx + 1}`;
+    card.text = answerBankEditDraft.text || "";
+
+    const rows = await ensureSpaceInterviewsLoaded();
+    const hits = findInterviewQuestionLinksForAnswerCard(rows, card);
+    let syncToInterview = false;
+    if (hits.length > 0) {
+      syncToInterview = window.confirm(
+        `该卡片关联 ${hits.length} 处面试复盘题目。\n\n确定：同步更新面试中的题目\n取消：仅更新标准题库`
+      );
+    }
+
+    await saveAnswer();
+
+    if (syncToInterview && hits.length > 0) {
+      await syncAnswerCardToInterviewRecords(card, hits);
+      showToast("已保存题库，并同步更新面试题目", "success");
+    } else {
+      showToast("题库卡片已保存", "success");
+    }
+
+    if (answerBankDetailOpen.value && answerBankDetailCard.value?.key === card.key) {
+      answerBankDetailCard.value = { ...card };
+    }
+    closeAnswerBankEdit();
+  } catch (e) {
+    showToast(e?.message || "保存失败", "error");
+  } finally {
+    answerBankEditSaving.value = false;
+  }
 }
 
 function addAnswerCard() {
@@ -3238,13 +3646,27 @@ function normalizeAnswerCardTitle(card, index) {
   card.title = next || `自定义题库${index + 1}`;
 }
 
-function removeAnswerCard(index) {
-  if (answerCards.length <= 1) {
-    alert("至少保留一张题库卡片");
-    return;
+async function removeAnswerCard(index) {
+  const card = answerCards[index];
+  if (!card) return;
+  const linkedHint = card.sourceQuestionId
+    ? "\n\n将同时取消对应面试题目的「已收藏」标记（不删除面试题目本身）。"
+    : "";
+  if (!window.confirm(`确认删除该题库卡片吗？${linkedHint}`)) return;
+
+  try {
+    if (card.sourceQuestionId || card.key) {
+      await clearInterviewAnswerBankLinks(card);
+    }
+    answerCards.splice(index, 1);
+    await saveAnswer();
+    if (answerBankDetailOpen.value && answerBankDetailCard.value?.key === card.key) {
+      closeAnswerBankDetail();
+    }
+    showToast("已删除题库卡片", "success");
+  } catch (e) {
+    showToast(e?.message || "删除失败", "error");
   }
-  if (!confirm("确认删除该题库卡片吗？")) return;
-  answerCards.splice(index, 1);
 }
 
 function onAnswerDragStart(index) {
@@ -3441,7 +3863,7 @@ function backToRealInterviewList() {
   selectedRealRecordId.value = "";
 }
 
-async function saveMockInterviewSession() {
+async function saveMockInterviewSession(opts = {}) {
   if (!currentSpaceId.value || !selectedMockRecordId.value) return;
   prepareInterviewRoundsForPersist(mockInterviewRounds);
   const roundNum = Math.max(1, mockInterviewRounds.length);
@@ -3468,13 +3890,13 @@ async function saveMockInterviewSession() {
     interviews.value = await listInterview(currentSpaceId.value);
     const row = interviews.value.find((x) => String(x.recordId) === String(selectedMockRecordId.value));
     if (row) hydrateMockInterviewFromRecord(row);
-    showToast("已保存", "success");
+    if (!opts.silent) showToast("已保存", "success");
   } catch (e) {
     showToast(e?.message || "保存失败", "error");
   }
 }
 
-async function saveRealInterviewSession() {
+async function saveRealInterviewSession(opts = {}) {
   if (!currentSpaceId.value || !selectedRealRecordId.value) return;
   prepareInterviewRoundsForPersist(realInterviewRounds);
   const roundNum = Math.max(1, realInterviewRounds.length);
@@ -3503,7 +3925,7 @@ async function saveRealInterviewSession() {
     interviews.value = await listInterview(currentSpaceId.value);
     const row = interviews.value.find((x) => String(x.recordId) === String(selectedRealRecordId.value));
     if (row) hydrateRealInterviewFromRecord(row);
-    showToast("已保存", "success");
+    if (!opts.silent) showToast("已保存", "success");
   } catch (e) {
     showToast(e?.message || "保存失败", "error");
   }
@@ -3541,6 +3963,18 @@ function onGlobalEscape(e) {
   }
   if (builtinRoleDetailOpen.value) {
     closeBuiltinRoleDetail();
+    return;
+  }
+  if (answerBankEditOpen.value) {
+    closeAnswerBankEdit();
+    return;
+  }
+  if (answerBankDetailOpen.value) {
+    closeAnswerBankDetail();
+    return;
+  }
+  if (questionDetailOpen.value) {
+    closeQuestionDetailModal();
     return;
   }
   if (addQuestionModalOpen.value) {
@@ -4387,7 +4821,9 @@ onBeforeUnmount(() => {
             <h2 class="text-lg font-semibold text-gray-800 mb-1 flex items-center gap-2">
               <i class="fa-solid fa-clipboard-list text-primary"></i>标准题库
             </h2>
-            <p class="text-sm text-gray-500 mb-4">按卡片管理标准答案片段，可拖拽排序。</p>
+            <p class="text-sm text-gray-500 mb-4">
+              按卡片管理标准答案；点击卡片查看详情，修改保存时可选择是否同步至关联的面试复盘题目。
+            </p>
             <div class="flex flex-wrap gap-2 items-center mb-4">
               <input
                 v-model="newAnswerCardTitle"
@@ -4429,29 +4865,63 @@ onBeforeUnmount(() => {
               <div
                 v-for="(card, idx) in answerCards"
                 :key="card.key"
-                class="bg-gray-50 rounded-lg border border-gray-200 p-4 hover:shadow-card transition-shadow cursor-grab active:cursor-grabbing"
-                draggable="true"
-                @dragstart="onAnswerDragStart(idx)"
-                @dragover.prevent
-                @drop="onAnswerDrop(idx)"
+                role="button"
+                tabindex="0"
+                class="bg-gray-50 p-4 rounded-lg border border-gray-200 hover:shadow-card hover:border-primary/30 transition-shadow cursor-pointer"
+                @click="openAnswerBankDetail(idx)"
+                @keydown.enter.prevent="openAnswerBankDetail(idx)"
               >
-                <div class="flex items-center justify-between gap-2 mb-2">
-                  <input
-                    v-model="card.title"
-                    type="text"
-                    class="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 rounded-md text-sm font-medium focus:ring-2 focus:ring-primary"
-                    placeholder="卡片名称"
-                    @blur="normalizeAnswerCardTitle(card, idx)"
-                  />
-                  <button type="button" class="text-gray-400 hover:text-red-600 p-2 shrink-0" @click="removeAnswerCard(idx)">
-                    <i class="fa-solid fa-trash"></i>
-                  </button>
+                <div class="flex justify-between items-start gap-2">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center flex-wrap gap-2">
+                      <span
+                        class="text-xs font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded truncate max-w-full"
+                        >{{ card.title || `卡片${idx + 1}` }}</span
+                      >
+                      <span
+                        v-if="card.sourceQuestionId"
+                        class="text-[10px] font-medium bg-amber-100 text-amber-900 px-2 py-0.5 rounded shrink-0"
+                        >来自面试</span
+                      >
+                    </div>
+                    <p
+                      v-if="previewAnswerBankCardText(card.text)"
+                      class="text-sm text-gray-600 mt-2 line-clamp-4 whitespace-pre-wrap"
+                    >
+                      {{ previewAnswerBankCardText(card.text) }}
+                    </p>
+                    <p v-else class="text-sm text-gray-400 mt-2 italic">暂无内容，点击查看或修改</p>
+                  </div>
+                  <div class="flex gap-1 shrink-0" @click.stop>
+                    <button
+                      type="button"
+                      class="text-gray-400 hover:text-gray-700 p-1"
+                      title="修改"
+                      @click="openAnswerBankEdit(idx)"
+                    >
+                      <i class="fa-solid fa-pencil"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="text-gray-400 hover:text-red-600 p-1"
+                      title="删除"
+                      @click="removeAnswerCard(idx)"
+                    >
+                      <i class="fa-solid fa-trash"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="text-gray-300 hover:text-gray-500 p-1 cursor-grab active:cursor-grabbing"
+                      title="拖拽排序"
+                      draggable="true"
+                      @dragstart="onAnswerDragStart(idx)"
+                      @dragover.prevent
+                      @drop="onAnswerDrop(idx)"
+                    >
+                      <i class="fa-solid fa-grip-vertical"></i>
+                    </button>
+                  </div>
                 </div>
-                <textarea
-                  v-model="card.text"
-                  rows="5"
-                  class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-y min-h-[6rem]"
-                />
               </div>
             </div>
           </div>
@@ -4525,8 +4995,10 @@ onBeforeUnmount(() => {
               @edit-round="(i) => openEditInterviewModal(true, i)"
               @remove-round="(i) => removeInterviewRound(true, i)"
               @add-question="(i) => openAddQuestionModal(true, i)"
+              @view-question="(i, q) => openQuestionDetailModal(true, i, q)"
               @edit-question="(i, q) => openEditQuestionModal(true, i, q)"
               @remove-question="(i, id) => removeQuestionFromRound(true, i, id)"
+              @collect-to-answer-bank="(i, q) => collectQuestionToAnswerBank(true, i, q)"
               @start-video-interview="(i) => handleStartVideoInterview(true, i)"
             />
           </div>
@@ -4595,8 +5067,10 @@ onBeforeUnmount(() => {
               @edit-round="(i) => openEditInterviewModal(false, i)"
               @remove-round="(i) => removeInterviewRound(false, i)"
               @add-question="(i) => openAddQuestionModal(false, i)"
+              @view-question="(i, q) => openQuestionDetailModal(false, i, q)"
               @edit-question="(i, q) => openEditQuestionModal(false, i, q)"
               @remove-question="(i, id) => removeQuestionFromRound(false, i, id)"
+              @collect-to-answer-bank="(i, q) => collectQuestionToAnswerBank(false, i, q)"
               @start-video-interview="(i) => handleStartVideoInterview(false, i)"
             />
           </div>
@@ -5821,6 +6295,46 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <InterviewQuestionDetailModal
+      :open="questionDetailOpen"
+      :question="questionDetailQuestion"
+      :round-title="questionDetailRoundTitle"
+      :panel-modal-dragging="panelModalDragging"
+      :panel-modal-offset="panelModalOffset"
+      @close="closeQuestionDetailModal"
+      @edit="editQuestionFromDetail"
+      @collect-to-answer-bank="
+        () =>
+          collectQuestionToAnswerBank(
+            questionDetailForMock,
+            questionDetailRoundIndex,
+            questionDetailQuestion
+          )
+      "
+      @header-pointerdown="onPanelModalHeaderPointerDown"
+    />
+
+    <AnswerBankCardDetailModal
+      :open="answerBankDetailOpen"
+      :card="answerBankDetailCard"
+      :panel-modal-dragging="panelModalDragging"
+      :panel-modal-offset="panelModalOffset"
+      @close="closeAnswerBankDetail"
+      @edit="editAnswerBankFromDetail"
+      @header-pointerdown="onPanelModalHeaderPointerDown"
+    />
+
+    <AnswerBankCardEditModal
+      :open="answerBankEditOpen"
+      :draft="answerBankEditDraft"
+      :saving="answerBankEditSaving"
+      :panel-modal-dragging="panelModalDragging"
+      :panel-modal-offset="panelModalOffset"
+      @close="closeAnswerBankEdit"
+      @save="submitAnswerBankEdit"
+      @header-pointerdown="onPanelModalHeaderPointerDown"
+    />
 
     <div
       v-if="addQuestionModalOpen"

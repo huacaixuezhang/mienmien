@@ -7,19 +7,26 @@ import com.mienmien.business.management.domain.DomainException;
 import com.mienmien.business.management.domain.model.AiModelConfig;
 import com.mienmien.business.management.domain.repository.AiModelConfigRepository;
 import com.mienmien.business.management.infrastructure.capability.BailianLlmClient;
+import com.mienmien.business.management.infrastructure.crypto.RsaAsymmetricCryptoService;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 
 @Service
 public class AiModelConfigApplicationService {
+    private static final String API_KEY_MASK = "********";
+
     private final AiModelConfigRepository aiModelConfigRepository;
     private final BailianLlmClient bailianLlmClient;
+    private final RsaAsymmetricCryptoService rsaAsymmetricCryptoService;
 
     public AiModelConfigApplicationService(
-            AiModelConfigRepository aiModelConfigRepository, BailianLlmClient bailianLlmClient) {
+            AiModelConfigRepository aiModelConfigRepository,
+            BailianLlmClient bailianLlmClient,
+            RsaAsymmetricCryptoService rsaAsymmetricCryptoService) {
         this.aiModelConfigRepository = aiModelConfigRepository;
         this.bailianLlmClient = bailianLlmClient;
+        this.rsaAsymmetricCryptoService = rsaAsymmetricCryptoService;
     }
 
     /** 当前登录用户的模型配置（与空间无关，全空间共享）。 */
@@ -31,19 +38,16 @@ public class AiModelConfigApplicationService {
                 .orElseGet(
                         () ->
                                 new AiModelConfigResponse(
-                                        "mc_" + userId, userId, "aliyun-bailian", "", "", "", Instant.now()));
+                                        "mc_" + userId, userId, "aliyun-bailian", "", "", false, "", Instant.now()));
     }
 
-    public AiModelConfigResponse upsertMine(String provider, String baseUrl, String apiKey, String modelName) {
+    public AiModelConfigResponse upsertMine(String provider, String baseUrl, String apiKeyCipher, String modelName) {
         String userId = BusinessRequestActor.requireUserId();
         return aiModelConfigRepository
                 .findByOwnerUserId(userId)
                 .map(
                         existing -> {
-                            String nextApiKey =
-                                    (apiKey == null || apiKey.isBlank())
-                                            ? existing.getApiKey()
-                                            : apiKey.trim();
+                            String nextApiKey = resolveStoredApiKey(existing.getApiKey(), apiKeyCipher);
                             existing.update(provider, baseUrl, nextApiKey, modelName);
                             aiModelConfigRepository.update(existing);
                             return toResponse(existing);
@@ -51,8 +55,9 @@ public class AiModelConfigApplicationService {
                 .orElseGet(
                         () -> {
                             String configId = "mc_" + userId;
+                            String sealed = sealApiKeyForStorage(apiKeyCipher);
                             AiModelConfig created =
-                                    AiModelConfig.createNew(configId, userId, provider, baseUrl, apiKey, modelName);
+                                    AiModelConfig.createNew(configId, userId, provider, baseUrl, sealed, modelName);
                             aiModelConfigRepository.save(created);
                             return toResponse(created);
                         });
@@ -68,7 +73,8 @@ public class AiModelConfigApplicationService {
                                 () ->
                                         new DomainException(
                                                 "BUS-4001", "请先在系统设置中保存模型连接配置"));
-        if (cfg.getApiKey().isBlank()) {
+        String plainApiKey = rsaAsymmetricCryptoService.unsealFromStorage(cfg.getApiKey());
+        if (plainApiKey.isBlank()) {
             throw new DomainException("BUS-4001", "请先在系统设置中配置 API Key 并保存");
         }
         if (cfg.getBaseUrl().isBlank()) {
@@ -86,17 +92,38 @@ public class AiModelConfigApplicationService {
             throw new DomainException("BUS-4001", "请填写用于测试调用的模型名称");
         }
         String text =
-                bailianLlmClient.completeUserPrompt(cfg.getBaseUrl(), cfg.getApiKey(), model, prompt);
+                bailianLlmClient.completeUserPrompt(cfg.getBaseUrl(), plainApiKey, model, prompt);
         return new ModelConfigTestResponse(text);
     }
 
+    private String resolveStoredApiKey(String existingStored, String apiKeyCipher) {
+        if (apiKeyCipher == null || apiKeyCipher.isBlank()) {
+            return existingStored == null ? "" : existingStored;
+        }
+        if (RsaAsymmetricCryptoService.looksLikeMaskedPlaceholder(apiKeyCipher)) {
+            return existingStored == null ? "" : existingStored;
+        }
+        return sealApiKeyForStorage(apiKeyCipher);
+    }
+
+    private String sealApiKeyForStorage(String apiKeyCipher) {
+        String plain = rsaAsymmetricCryptoService.resolveInboundSecret(apiKeyCipher);
+        if (plain.isBlank()) {
+            return "";
+        }
+        return rsaAsymmetricCryptoService.sealForStorage(plain);
+    }
+
     private static AiModelConfigResponse toResponse(AiModelConfig c) {
+        String stored = c.getApiKey() == null ? "" : c.getApiKey().trim();
+        boolean configured = !stored.isBlank();
         return new AiModelConfigResponse(
                 c.getConfigId(),
                 c.getOwnerUserId(),
                 c.getProvider(),
                 c.getBaseUrl(),
-                c.getApiKey(),
+                configured ? API_KEY_MASK : "",
+                configured,
                 c.getModelName(),
                 c.getUpdatedAt());
     }
